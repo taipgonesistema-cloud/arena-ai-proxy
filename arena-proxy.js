@@ -22,13 +22,11 @@ if (fs.existsSync(envPath)) {
 }
 
 const PORT = Number(process.env.PORT || 9228);
-const RELAY = (process.env.BROWSER_RELAY_URL || "http://localhost:9223").replace(/\/+$/, "");
 const PROXY_API_KEY = process.env.PROXY_API_KEY || "";
 const ARENA_COOKIE = process.env.ARENA_COOKIE || "";
 const DEFAULT_MODEL_ID = process.env.ARENA_DEFAULT_MODEL_ID || "019b24bb-5caf-71c3-b854-37d0c7086f21";
 const ARENA_MODALITY = process.env.ARENA_MODALITY || "chat";
 const ARENA_SESSION_URL = (process.env.ARENA_SESSION_URL || "http://127.0.0.1:9230").replace(/\/+$/, "");
-const ARENA_RECAPTCHA_SOURCE = process.env.ARENA_RECAPTCHA_SOURCE || "auto";
 
 const PI_AGENT_CONTRACT = `You are a precise, pragmatic software engineering agent.
 Your priorities are correctness, evidence, minimal safe changes, and clear concise communication.
@@ -64,7 +62,6 @@ Do not produce malformed JSON.
 Use Portuguese when the user writes Portuguese, unless the task requires code or exact command output.`;
 
 let requestQueue = Promise.resolve();
-let arenaTabId = null;
 
 function log(...args) { console.log("[arena-proxy]", ...args); }
 
@@ -109,33 +106,6 @@ function uuidv7() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function relay(path, body = null, timeoutMs = 60000) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(RELAY + path);
-    const opts = {
-      method: body === null ? "GET" : "POST",
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname + url.search,
-      timeout: timeoutMs,
-    };
-    if (body !== null) opts.headers = { "Content-Type": "text/plain;charset=UTF-8", "Content-Length": Buffer.byteLength(body) };
-    const req = http.request(opts, (res) => {
-      let data = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => data += c);
-      res.on("end", () => {
-        try { resolve(JSON.parse(data)); }
-        catch (err) { reject(new Error(`Relay parse: ${err.message}: ${data.slice(0, 200)}`)); }
-      });
-    });
-    req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("Relay timeout")); });
-    if (body !== null) req.write(body);
-    req.end();
-  });
-}
-
 async function sessionJson(path, timeoutMs = 30000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -157,49 +127,12 @@ async function sessionJson(path, timeoutMs = 30000) {
 
 async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function getArenaTabId() {
-  if (arenaTabId) return arenaTabId;
-  const r = await relay("/tabs", null, 10000);
-  const tabs = r?.result || [];
-  const tab = tabs.find((t) => t.url?.includes("arena.ai"));
-  if (!tab) throw new Error("No arena.ai tab found. Open https://arena.ai in the browser.");
-  arenaTabId = tab.id;
-  return tab.id;
-}
-
 async function getRecaptchaToken() {
-  if (ARENA_RECAPTCHA_SOURCE !== "browserbridge") {
-    try {
-      logRequest("recaptcha:playwright:start", { session: ARENA_SESSION_URL });
-      const data = await sessionJson("/recaptcha", 45000);
-      logRequest("recaptcha:playwright:ok", { tokenLength: data?.token?.length || 0 });
-      if (data?.token) return data.token;
-    } catch (err) {
-      if (ARENA_RECAPTCHA_SOURCE === "playwright") throw err;
-      log("Playwright reCAPTCHA unavailable, falling back to BrowserBridge:", err.message);
-    }
-  }
-
-  const id = await getArenaTabId();
-  logRequest("recaptcha:browserbridge:start", { tabId: id });
-  const code = `(()=>{
-    try {
-      return new Promise((resolve, reject) => {
-        if(typeof grecaptcha === 'undefined' || !grecaptcha.enterprise) {
-          reject('grecaptcha.enterprise not loaded');
-          return;
-        }
-        grecaptcha.enterprise.execute('6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0', {action: 'chat_submit'})
-          .then(resolve)
-          .catch(reject);
-      });
-    } catch(e) { return 'error:' + e.message; }
-  })()`;
-  const r = await relay(`/evalAsync?tabId=${id}&timeout=20000`, code, 25000);
-  const result = r?.result?.result || r?.result?.error;
-  if (!result || String(result).startsWith("error")) throw new Error(`reCAPTCHA failed: ${result}`);
-  logRequest("recaptcha:browserbridge:ok", { tokenLength: String(result).length });
-  return result;
+  logRequest("recaptcha:playwright:start", { session: ARENA_SESSION_URL });
+  const data = await sessionJson("/recaptcha", 45000);
+  logRequest("recaptcha:playwright:ok", { tokenLength: data?.token?.length || 0 });
+  if (!data?.token) throw new Error("Playwright session did not return a reCAPTCHA token");
+  return data.token;
 }
 
 async function getCookies() {
@@ -207,25 +140,11 @@ async function getCookies() {
     logRequest("cookies:env", { length: ARENA_COOKIE.length });
     return ARENA_COOKIE;
   }
-  try {
-    logRequest("cookies:playwright:start", { session: ARENA_SESSION_URL });
-    const data = await sessionJson("/cookies", 15000);
-    if (data?.cookieHeader) {
-      logRequest("cookies:playwright:ok", { length: data.cookieHeader.length });
-      return data.cookieHeader;
-    }
-  } catch (err) {
-    log("Playwright cookies unavailable, falling back to BrowserBridge:", err.message);
-  }
-  const r = await relay("/cookies?timeout=10000", null, 15000);
-  const raw = r?.result?.cookies || r?.result || [];
-  const cookies = Array.isArray(raw) ? raw : [];
-  const relevant = cookies.filter((c) =>
-    c.name?.includes("arena-auth") || c.name === "cf_clearance" || c.name === "user_country_code"
-  );
-  const header = relevant.map((c) => `${c.name}=${c.value}`).join("; ");
-  logRequest("cookies:browserbridge:ok", { count: relevant.length, length: header.length });
-  return header;
+  logRequest("cookies:playwright:start", { session: ARENA_SESSION_URL });
+  const data = await sessionJson("/cookies", 15000);
+  if (!data?.cookieHeader) throw new Error("Playwright session did not return Arena cookies");
+  logRequest("cookies:playwright:ok", { length: data.cookieHeader.length });
+  return data.cookieHeader;
 }
 
 function lastUserText(messages) {
@@ -860,11 +779,10 @@ http.createServer((req, res) => {
   json(res, 404, { error: "Not found" });
 }).listen(PORT, () => {
   log(`Running on http://localhost:${PORT}`);
-  log(`Browser relay: ${RELAY}`);
   log(`Default model: ${DEFAULT_MODEL_ID}`);
   log(`Modality: ${ARENA_MODALITY}`);
-  log(`Arena session: ${ARENA_SESSION_URL} (${ARENA_RECAPTCHA_SOURCE})`);
+  log(`Arena session: ${ARENA_SESSION_URL}`);
   if (PROXY_API_KEY) log("API key auth enabled");
   if (ARENA_COOKIE) log(`Cookie loaded from env (${ARENA_COOKIE.length} chars)`);
-  else log("No cookie in env, will fetch from BrowserBridge");
+  else log("No cookie in env, will fetch from Playwright session");
 });

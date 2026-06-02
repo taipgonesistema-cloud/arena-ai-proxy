@@ -226,7 +226,7 @@ POST /nextjs-api/stream/post-to-evaluation/{evaluationSessionId}
 
 ## Body Real Capturado
 
-Request real capturado via BrowserBridge (modelo "Max", prompt "oi"):
+Request real capturado na página da Arena (modelo "Max", prompt "oi"):
 
 ```json
 {
@@ -387,8 +387,8 @@ Fluxo atual:
 1. Recebe request OpenAI-compatible.
 2. Monta prompt a partir de `messages`.
 3. Se `tools` existir, injeta contrato curto de `<tool_call>{...}</tool_call>`.
-4. Pega token reCAPTCHA via BrowserBridge em uma aba `arena.ai` aberta.
-5. Usa cookie do `.env` (`ARENA_COOKIE`) ou tenta cookies via BrowserBridge.
+4. Pega token reCAPTCHA via session service Playwright.
+5. Usa cookie do `.env` (`ARENA_COOKIE`) ou cookies do session service Playwright.
 6. Chama `POST https://arena.ai/nextjs-api/stream/create-evaluation`.
 7. Parseia SSE `a0:` como texto e `ad:` como finalização.
 8. Retorna JSON/SSE OpenAI-compatible.
@@ -396,12 +396,11 @@ Fluxo atual:
 Variáveis suportadas:
 
 ```text
-PORT=9227
-BROWSER_RELAY_URL=http://localhost:9223
+PORT=9228
 PROXY_API_KEY=<opcional>
 ARENA_COOKIE=<cookie completo>
 ARENA_DEFAULT_MODEL_ID=019b24bb-5caf-71c3-b854-37d0c7086f21
-ARENA_MODALITY=webdev
+ARENA_MODALITY=chat
 ```
 
 Resultados de smoke test:
@@ -439,7 +438,7 @@ Observações atualizadas:
 - Em `modality: "chat"`, o teste `responda exatamente: chat-ok` retornou `chat-ok` limpo.
 - Prompt grande com contrato completo causou `429 {"error":"prompt failed"}`; contrato de tools precisa ser curto.
 - O session service Playwright (`arena-session.cjs`) mantém uma página aberta para cookies/reCAPTCHA e não chama `page.bringToFront()` ao gerar token, evitando roubar foco da tela.
-- Sem o session service Playwright ou uma aba `arena.ai` via BrowserBridge, o proxy falha ao gerar reCAPTCHA.
+- Sem o session service Playwright, o proxy falha ao gerar reCAPTCHA.
 - Modelo Max em `modality: chat` foi estável nos smoke tests; Sonnet ainda pode bater rate limit/model error.
 
 Smoke tests atualizados:

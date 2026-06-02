@@ -100,7 +100,6 @@ async function saveCookiesToEnv() {
   upsertEnv({
     ARENA_COOKIE: header,
     ARENA_SESSION_URL: `http://127.0.0.1:${PORT}`,
-    ARENA_RECAPTCHA_SOURCE: "playwright",
   });
   process.env.ARENA_COOKIE = header;
   lastCookieSavedAt = Date.now();
