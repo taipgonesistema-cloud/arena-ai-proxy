@@ -142,7 +142,7 @@ async function getAccountRuntime(account) {
   if (cookies.length > 0) await context.addCookies(cookies).catch(() => {});
   const page = await context.newPage();
   try {
-    await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
   } catch (err) {
     // proxy lento ou morto, marca como ruim
     if (proxy) markProxyBad(proxy.server);
@@ -159,7 +159,7 @@ async function getPageRecaptchaToken(page, label = "page") {
   await page.waitForFunction(
     () => window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute,
     null,
-    { timeout: 15000 }
+    { timeout: 30000 }
   );
   const token = await page.evaluate((siteKey) => {
     return window.grecaptcha.enterprise.execute(siteKey, { action: "chat_submit" });
