@@ -194,7 +194,13 @@ Authorization: Bearer sua-chave
 
 ## Pi.dev e Kilo Code
 
-Exemplo para `C:\Users\SEU_USUARIO\.pi\agent\models.json`:
+Arquivo no Windows:
+
+```text
+C:\Users\SEU_USUARIO\.pi\agent\models.json
+```
+
+Exemplo completo do `models.json`:
 
 ```json
 {
@@ -221,10 +227,24 @@ Exemplo para `C:\Users\SEU_USUARIO\.pi\agent\models.json`:
 }
 ```
 
+Se já existir outro provider no arquivo, mantenha os providers existentes e adicione apenas a chave `"arena-ai"` no objeto principal.
+
 Teste:
 
 ```bat
 pi --offline --model arena-ai/arena-default -p "Responda exatamente: pi-ok"
+```
+
+Teste sem ferramentas:
+
+```bat
+pi --offline --no-tools --model arena-ai/arena-default -p "Responda exatamente: pi-ok"
+```
+
+Teste com ferramentas:
+
+```bat
+pi --offline --model arena-ai/arena-default -p "Use uma ferramenta para ver onde estamos e responda apenas com o caminho atual."
 ```
 
 ## Scripts
