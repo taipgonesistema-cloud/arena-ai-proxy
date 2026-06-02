@@ -89,7 +89,10 @@ function isAuthorized(req) {
   return auth === `Bearer ${PROXY_API_KEY}` || apiKey === PROXY_API_KEY;
 }
 
-function unauthorized(res) { json(res, 401, { error: "Unauthorized" }); }
+function apiError(res, status, message, type = "server_error", code = null) {
+  json(res, status, { error: { message, type, code } });
+}
+function unauthorized(res) { apiError(res, 401, "Unauthorized"); }
 
 function uuidv7() {
   const bytes = crypto.randomBytes(16);
@@ -662,7 +665,7 @@ http.createServer((req, res) => {
     req.on("end", () => {
       let params;
       try { params = JSON.parse(body); }
-      catch (err) { json(res, 400, { error: `Invalid JSON: ${err.message}` }); return; }
+      catch (err) { apiError(res, 400, `Invalid JSON: ${err.message}`); return; }
 
       requestQueue = requestQueue.then(async () => {
         try {
@@ -713,20 +716,24 @@ http.createServer((req, res) => {
 
             await new Promise((resolvePromise, rejectPromise) => {
               let currentId = null;
+              let currentCookie = null;
               const doCall = async (retriesLeft) => {
-                let account;
-                try { account = await getNextAccount(); }
-                catch (err) { rejectPromise(err); return; }
-                if (!account?.cookieHeader) { rejectPromise(new Error("No Arena cookie available")); return; }
-                if (currentId && account.id !== currentId) {
-                  await markRateLimited(currentId).catch(() => {});
+                if (!currentCookie) {
+                  let account;
+                  try { account = await getNextAccount(); }
+                  catch (err) { rejectPromise(err); return; }
+                  if (!account?.cookieHeader) { rejectPromise(new Error("No Arena cookie available")); return; }
+                  if (currentId && account.id !== currentId) {
+                    await markRateLimited(currentId).catch(() => {});
+                  }
+                  currentId = account.id;
+                  currentCookie = account.cookieHeader;
                 }
-                currentId = account.id;
                 const collectedLocal = [];
                 arenaStreamCall(
                   prompt,
                   modelId,
-                  account.cookieHeader,
+                  currentCookie,
                   recaptchaToken,
                   (text) => {
                     collectedLocal.push(text);
@@ -768,13 +775,13 @@ http.createServer((req, res) => {
                     if (is429 && retriesLeft > 0) {
                       const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retriesLeft));
                       logRequest("arena:retry", { account: currentId, retriesLeft, delay, err: err.message.slice(0, 100) });
-                      markRateLimited(currentId).catch(() => {});
                       setTimeout(() => doCall(retriesLeft - 1), delay);
                     } else {
+                      if (is429) markRateLimited(currentId).catch(() => {});
                       if (!res.headersSent) {
-                        json(res, 500, { error: err.message });
+                        apiError(res, 500, err.message);
                       } else {
-                        streamJson(res, { error: err.message });
+                        streamJson(res, { error: { message: err.message } });
                         res.write("data: [DONE]\n\n");
                         res.end();
                       }
@@ -787,28 +794,24 @@ http.createServer((req, res) => {
             });
           } else {
             let result = null;
-            let currentId = null;
+            let account;
+            try { account = await getNextAccount(); }
+            catch (err) { throw err; }
+            if (!account?.cookieHeader) throw new Error("No Arena cookie available");
+            const attemptAccountId = account.id;
             for (let retries = 3; retries > 0; retries--) {
-              let account;
-              try { account = await getNextAccount(); }
-              catch (err) { throw err; }
-              if (!account?.cookieHeader) throw new Error("No Arena cookie available");
-              if (currentId && account.id !== currentId) {
-                await markRateLimited(currentId).catch(() => {});
-              }
-              currentId = account.id;
               result = await arenaDirectCall(prompt, modelId, account.cookieHeader, recaptchaToken);
               if (result.status === 200) break;
               const is429 = result.status === 429 || /Too Many Requests|rate.?limit/i.test(result.text);
               if (!is429 || retries <= 1) {
-                logRequest("request:error", { model: params.model || "arena-default", account: currentId, status: result.status, body: result.text.slice(0, 300) });
+                logRequest("request:error", { model: params.model || "arena-default", account: attemptAccountId, status: result.status, body: result.text.slice(0, 300) });
                 throw new Error(`Arena ${result.status}: ${result.text.slice(0, 500)}`);
               }
-              await markRateLimited(currentId).catch(() => {});
               const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retries));
-              logRequest("arena:retry", { account: currentId, retriesLeft: retries - 1, delay });
+              logRequest("arena:retry", { account: attemptAccountId, retriesLeft: retries - 1, delay });
               await new Promise((r) => setTimeout(r, delay));
             }
+            if (result.status === 429) markRateLimited(attemptAccountId).catch(() => {});
             const parsed = parseArenaSse(result.text);
             const toolParsed = parseToolCalls(parsed.text);
             const usage = usageFromText(prompt, parsed.text, parsed.finish);
@@ -831,9 +834,9 @@ http.createServer((req, res) => {
           }
         } catch (err) {
           log("ERROR:", err.message);
-          if (!res.headersSent) json(res, 500, { error: err.message });
+          if (!res.headersSent) apiError(res, 500, err.message);
           else {
-            streamJson(res, { error: err.message });
+            streamJson(res, { error: { message: err.message } });
             res.write("data: [DONE]\n\n");
             res.end();
           }
@@ -855,7 +858,7 @@ http.createServer((req, res) => {
     return;
   }
 
-  json(res, 404, { error: "Not found" });
+  apiError(res, 404, "Not found");
 }).listen(PORT, () => {
   log(`Running on http://localhost:${PORT}`);
   log(`Default model: ${DEFAULT_MODEL_ID}`);
