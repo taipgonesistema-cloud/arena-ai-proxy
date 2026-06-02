@@ -162,57 +162,7 @@ function hasToolResult(messages) {
 }
 
 function explicitlyRequestsTool(text) {
-  return /\b(tool|ferramenta|bash|command|comando|run|rodar|execute|executar|pwd|cwd|path|diret[oó]rio|pasta|workspace|read|ler|list|listar|grep|find|edit|editar|write|escrever)\b|onde estamos|onde estou|where are we|current directory|working directory/i.test(String(text || ""));
-}
-
-function asksCurrentDirectory(text) {
-  return /\b(pwd|cwd|current directory|working directory|diret[oó]rio atual|pasta atual|workspace atual)\b|onde estamos|onde estou|where are we/i.test(String(text || ""));
-}
-
-function toolName(tool) {
-  return tool?.function?.name || tool?.name || "";
-}
-
-function toolProperties(tool) {
-  return tool?.function?.parameters?.properties || tool?.parameters?.properties || {};
-}
-
-function deterministicToolCall(params) {
-  const tools = Array.isArray(params?.tools) ? params.tools : [];
-  if (tools.length === 0 || hasToolResult(params?.messages)) return null;
-  const lastText = lastUserText(params?.messages);
-  if (!asksCurrentDirectory(lastText)) return null;
-
-  const shellTool = tools.find((tool) => {
-    const name = toolName(tool).toLowerCase();
-    const props = toolProperties(tool);
-    return (name === "bash" || name.includes("command") || name.includes("terminal") || name.includes("shell")) && props.command;
-  });
-  if (!shellTool) return null;
-
-  const args = { command: "pwd" };
-  return {
-    id: "call_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16),
-    type: "function",
-    function: { name: toolName(shellTool), arguments: JSON.stringify(args) },
-  };
-}
-
-function lastToolContent(messages) {
-  const toolMessage = [...(messages || [])].reverse().find((m) => m?.role === "tool" || m?.role === "function" || m?.role === "toolResult");
-  return messageContent(toolMessage?.content).trim();
-}
-
-function deterministicFinalResponse(params) {
-  const messages = Array.isArray(params?.messages) ? params.messages : [];
-  if (!hasToolResult(messages)) return "";
-  const recentUser = [...messages].reverse().find((m) => m?.role === "user");
-  const toolText = lastToolContent(messages);
-  if (!toolText) return "";
-  if (asksCurrentDirectory(messageContent(recentUser?.content))) {
-    return toolText;
-  }
-  return "";
+  return /\b(tool|ferramenta|bash|command|comando|run|rodar|execute|executar|pwd|read|ler|list|listar|grep|find|edit|editar|write|escrever)\b/i.test(String(text || ""));
 }
 
 function messageContent(content) {
@@ -517,6 +467,16 @@ async function arenaStreamCall(prompt, modelId, cookie, recaptchaToken, onText, 
   };
 
   const req = https.request(opts, (res) => {
+    if (res.statusCode !== 200) {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => data += c);
+      res.on("end", () => {
+        logRequest("arena:stream:error", { status: res.statusCode, ms: Date.now() - started, bytes: data.length, modelId, modality: ARENA_MODALITY, body: data.slice(0, 200) });
+        onError(new Error(`Arena ${res.statusCode}: ${data.slice(0, 500)}`));
+      });
+      return;
+    }
     res.setEncoding("utf8");
     let raw = "";
     let pending = "";
@@ -545,7 +505,7 @@ async function arenaStreamCall(prompt, modelId, cookie, recaptchaToken, onText, 
       logRequest("arena:stream:done", { status: res.statusCode, ms: Date.now() - started, bytes: raw.length + pending.length, modelId, modality: ARENA_MODALITY, finishReason: parsed.finish?.finishReason });
       onFinish(parsed.finish);
     });
-    res.on("error", onError);
+    res.on("error", (e) => onError(e));
   });
   req.on("error", onError);
   req.on("timeout", () => { req.destroy(); onError(new Error("timeout")); });
@@ -697,8 +657,6 @@ http.createServer((req, res) => {
 
           const modelId = modelIdFromRequest(params);
           const stream = params.stream === true;
-          const deterministicFinal = deterministicFinalResponse(params);
-          const deterministicCall = deterministicToolCall(params);
 
           logRequest("request:start", {
             model: params.model || "arena-default",
@@ -709,61 +667,6 @@ http.createServer((req, res) => {
             messages: Array.isArray(params.messages) ? params.messages.length : 0,
             promptChars: prompt.length,
           });
-
-          if (deterministicFinal) {
-            const streamState = {
-              id: `chatcmpl-${Date.now()}`,
-              created: Math.floor(Date.now() / 1000),
-              model: params.model || "arena",
-            };
-            const usage = usageFromText(prompt, deterministicFinal);
-            logRequest("request:deterministic-final", { model: params.model || "arena-default", contentChars: deterministicFinal.length });
-            if (stream) {
-              streamOpenAICompletion(res, streamState, deterministicFinal, { textContent: deterministicFinal, toolCalls: [] });
-            } else {
-              json(res, 200, {
-                id: streamState.id,
-                object: "chat.completion",
-                created: streamState.created,
-                model: streamState.model,
-                choices: [{
-                  index: 0,
-                  message: { role: "assistant", content: deterministicFinal },
-                  logprobs: null,
-                  finish_reason: "stop",
-                }],
-                usage,
-              });
-            }
-            return;
-          }
-
-          if (deterministicCall) {
-            const streamState = {
-              id: `chatcmpl-${Date.now()}`,
-              created: Math.floor(Date.now() / 1000),
-              model: params.model || "arena",
-            };
-            const parsed = { textContent: "", toolCalls: [deterministicCall] };
-            logRequest("request:deterministic-tool", { model: params.model || "arena-default", tool: deterministicCall.function.name });
-            if (stream) {
-              streamOpenAICompletion(res, streamState, "", parsed);
-            } else {
-              json(res, 200, {
-                id: streamState.id,
-                object: "chat.completion",
-                created: streamState.created,
-                model: streamState.model,
-                choices: [{
-                  index: 0,
-                  message: { role: "assistant", content: null, tool_calls: parsed.toolCalls },
-                  finish_reason: "tool_calls",
-                }],
-                usage: usageFromText(prompt, ""),
-              });
-            }
-            return;
-          }
 
           const cookie = await getCookies();
           if (!cookie) throw new Error("No Arena cookie available");
@@ -798,62 +701,82 @@ http.createServer((req, res) => {
             });
 
             await new Promise((resolvePromise, rejectPromise) => {
-              arenaStreamCall(
-                prompt,
-                modelId,
-                cookie,
-                recaptchaToken,
-                (text) => {
-                  collected.push(text);
-                  if (!hasTools || afterToolResult) {
-                    streamJson(res, {
-                      id: streamState.id,
-                      object: "chat.completion.chunk",
-                      created: streamState.created,
-                      model: streamState.model,
-                      choices: [streamChoice({ content: text })],
-                    });
+              const doCall = (retriesLeft) => {
+                const collectedLocal = [];
+                arenaStreamCall(
+                  prompt,
+                  modelId,
+                  cookie,
+                  recaptchaToken,
+                  (text) => {
+                    collectedLocal.push(text);
+                    if (!hasTools || afterToolResult) {
+                      streamJson(res, {
+                        id: streamState.id,
+                        object: "chat.completion.chunk",
+                        created: streamState.created,
+                        model: streamState.model,
+                        choices: [streamChoice({ content: text })],
+                      });
+                    }
+                  },
+                  (finish) => {
+                    collected.push(...collectedLocal);
+                    const fullText = collected.join("");
+                    const usage = usageFromText(prompt, fullText, finish);
+                    if (hasTools && !afterToolResult) {
+                      const parsed = parseToolCalls(fullText);
+                      logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: parsed.toolCalls.length > 0 ? "tool_calls" : "stop", contentChars: parsed.textContent.length, toolCalls: parsed.toolCalls.length, usage });
+                      streamOpenAICompletion(res, streamState, fullText, parsed, false);
+                    } else {
+                      logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: finish?.finishReason || "stop", contentChars: fullText.length, toolCalls: 0, usage });
+                      streamJson(res, {
+                        id: streamState.id,
+                        object: "chat.completion.chunk",
+                        created: streamState.created,
+                        model: streamState.model,
+                        choices: [streamChoice({}, finish?.finishReason || "stop")],
+                        usage,
+                      });
+                      res.write("data: [DONE]\n\n");
+                      res.end();
+                    }
+                    resolvePromise();
+                  },
+                  (err) => {
+                    const is429 = /429|Too Many Requests|rate.?limit/i.test(err.message);
+                    if (is429 && retriesLeft > 0) {
+                      const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retriesLeft));
+                      logRequest("arena:retry", { retriesLeft, delay, err: err.message.slice(0, 100) });
+                      setTimeout(() => doCall(retriesLeft - 1), delay);
+                    } else {
+                      if (!res.headersSent) {
+                        json(res, 500, { error: err.message });
+                      } else {
+                        streamJson(res, { error: err.message });
+                        res.write("data: [DONE]\n\n");
+                        res.end();
+                      }
+                      rejectPromise(err);
+                    }
                   }
-                },
-                (finish) => {
-                  const fullText = collected.join("");
-                  const usage = usageFromText(prompt, fullText, finish);
-                  if (hasTools && !afterToolResult) {
-                    const parsed = parseToolCalls(fullText);
-                    logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: parsed.toolCalls.length > 0 ? "tool_calls" : "stop", contentChars: parsed.textContent.length, toolCalls: parsed.toolCalls.length, usage });
-                    streamOpenAICompletion(res, streamState, fullText, parsed, false);
-                  } else {
-                    logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: finish?.finishReason || "stop", contentChars: fullText.length, toolCalls: 0, usage });
-                    streamJson(res, {
-                      id: streamState.id,
-                      object: "chat.completion.chunk",
-                      created: streamState.created,
-                      model: streamState.model,
-                      choices: [streamChoice({}, finish?.finishReason || "stop")],
-                      usage,
-                    });
-                    res.write("data: [DONE]\n\n");
-                    res.end();
-                  }
-                  resolvePromise();
-                },
-                (err) => {
-                  if (!res.headersSent) {
-                    json(res, 500, { error: err.message });
-                  } else {
-                    streamJson(res, { error: err.message });
-                    res.write("data: [DONE]\n\n");
-                    res.end();
-                  }
-                  rejectPromise(err);
-                }
-              );
+                );
+              };
+              doCall(3);
             });
           } else {
-            const result = await arenaDirectCall(prompt, modelId, cookie, recaptchaToken);
-            if (result.status !== 200) {
-              logRequest("request:error", { model: params.model || "arena-default", status: result.status, body: result.text.slice(0, 300) });
-              throw new Error(`Arena ${result.status}: ${result.text.slice(0, 500)}`);
+            let result = null;
+            for (let retries = 3; retries > 0; retries--) {
+              result = await arenaDirectCall(prompt, modelId, cookie, recaptchaToken);
+              if (result.status === 200) break;
+              const is429 = result.status === 429 || /Too Many Requests|rate.?limit/i.test(result.text);
+              if (!is429 || retries <= 1) {
+                logRequest("request:error", { model: params.model || "arena-default", status: result.status, body: result.text.slice(0, 300) });
+                throw new Error(`Arena ${result.status}: ${result.text.slice(0, 500)}`);
+              }
+              const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retries));
+              logRequest("arena:retry", { retriesLeft: retries - 1, delay, err: `Arena ${result.status}` });
+              await new Promise((r) => setTimeout(r, delay));
             }
             const parsed = parseArenaSse(result.text);
             const toolParsed = parseToolCalls(parsed.text);
