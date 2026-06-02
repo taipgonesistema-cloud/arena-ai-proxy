@@ -1,4 +1,6 @@
 .env
+accounts.json
+accounts.local.json
 *.log
 captures/
 raw/
