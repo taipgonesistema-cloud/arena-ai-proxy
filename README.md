@@ -322,3 +322,7 @@ node -e "fetch('http://127.0.0.1:9228/v1/models').then(r=>r.json()).then(console
 - A Arena AI pode alterar seletores, endpoints ou políticas de limite.
 - Tor é mais lento que o IP real; os timeouts foram ajustados para essa latência.
 - Proxies gratuitos públicos foram removidos do fluxo padrão porque são instáveis e, em geral, já estão bloqueados.
+
+## Licença
+
+Este projeto está licenciado sob a licença MIT. Consulte o arquivo `LICENSE`.
