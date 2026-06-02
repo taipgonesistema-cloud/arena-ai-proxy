@@ -14,7 +14,8 @@
     "doctor": "node doctor.cjs",
     "proxy": "node arena-proxy.js",
     "session": "node arena-session.cjs",
-    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js"
+    "launch": "node arena-launcher.cjs",
+    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js && node --check arena-launcher.cjs"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",
