@@ -88,6 +88,24 @@ npm run accounts:status
 
 Se o session service estiver offline, a TUI e o comando de status leem `accounts.json` diretamente e avisam que estão usando o fallback local. Para adicionar contas ou refazer login, o `npm start` precisa estar rodando, porque essas ações dependem do navegador Playwright.
 
+## Vibe-Start
+
+Inicia tudo de uma vez: mata processos anteriores, sobe a stack, configura o Pi.dev automaticamente e já inicia o Pi com o modelo `arena-default`.
+
+```bat
+npm run vibe
+```
+
+Ou pela TUI de contas: selecione a opção **[5] Vibe-Start**.
+
+O que faz:
+
+1. Mata todos os processos Node.js antigos;
+2. Inicia Tor + session service + proxy em background;
+3. Configura o provider `arena-ai` no `models.json` do Pi.dev;
+4. Aguarda a stack ficar pronta;
+5. Inicia o Pi.dev automaticamente com `pi --offline --model arena-ai/arena-default`.
+
 ## Tor e Proxy
 
 Por padrão, o projeto usa apenas o Tor como proxy.
@@ -261,6 +279,7 @@ pi --offline --model arena-ai/arena-default -p "Use uma ferramenta para ver onde
 | `npm install` | Instala dependências e baixa o Tor automaticamente |
 | `npm start` | Inicia Tor, session service e proxy |
 | `npm run login` | Abre a TUI de gerenciamento de contas |
+| `npm run vibe` | Vibe-Start: mata processos, reinicia stack, configura Pi.dev e inicia Pi com arena-default |
 | `npm run accounts:status` | Mostra status rápido das contas |
 | `npm run doctor` | Diagnostica Tor, portas, contas e endpoints |
 | `npm run proxy` | Inicia apenas o proxy OpenAI-compatible |

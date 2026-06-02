@@ -1,9 +1,15 @@
 import {render, Box, Text, useInput, useApp} from "ink";
 import {createElement as h, useState, useEffect, useCallback} from "react";
 import fs from "fs";
+import os from "os";
+import {execSync, spawn} from "child_process";
+import path from "path";
+import {fileURLToPath} from "url";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_URL = process.env.ARENA_SESSION_URL || "http://127.0.0.1:9230";
 const ACCOUNTS_PATH = new URL("./accounts.json", import.meta.url);
+const PI_MODELS_PATH = path.join(os.homedir(), ".pi", "agent", "models.json");
 
 async function get(pathname, timeoutMs = 10000) {
   try {
@@ -94,6 +100,8 @@ function Confirm({prompt, onYes, onNo}) {
 
 // ─── App ───────────────────────────────────────────────────
 
+let _vibeRequested = false;
+
 function App() {
   const {exit} = useApp();
   const [accounts, setAccounts] = useState([]);
@@ -102,6 +110,38 @@ function App() {
   const [pendingLabel, setPendingLabel] = useState("");
   const [pendingId, setPendingId] = useState(null);
   const [busyText, setBusyText] = useState("");
+
+  const vibeStart = useCallback(() => {
+    _vibeRequested = true;
+    setMode("busy");
+    setBusyText("Vibe-Start: matando processos...");
+    setTimeout(() => {
+      try { execSync(`taskkill /F /FI "PID ne ${process.pid}" /IM node.exe 2>NUL`, {stdio: "pipe"}); } catch {}
+      setBusyText("Vibe-Start: iniciando stack...");
+      setTimeout(() => {
+        try { execSync(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`, {cwd: __dirname, windowsHide: true}); } catch {}
+        setBusyText("Vibe-Start: configurando Pi.dev...");
+        setTimeout(() => {
+          try {
+            const piDir = path.dirname(PI_MODELS_PATH);
+            if (!fs.existsSync(piDir)) fs.mkdirSync(piDir, {recursive: true});
+            const arenaCfg = {
+              baseUrl: "http://localhost:9228/v1", api: "openai-completions", apiKey: "dummy",
+              compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
+              models: [{id: "arena-default", name: "Arena AI Default Chat", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 8192, cost: {input: 0, output: 0}}],
+            };
+            let existing = {};
+            try { existing = JSON.parse(fs.readFileSync(PI_MODELS_PATH, "utf8")); } catch {}
+            const providers = existing.providers || {};
+            providers["arena-ai"] = arenaCfg;
+            fs.writeFileSync(PI_MODELS_PATH, JSON.stringify({...existing, providers}, null, 2), "utf8");
+          } catch {}
+          setBusyText("Vibe-Start: iniciando Pi.dev...");
+          setTimeout(() => { exit(); }, 1000);
+        }, 2000);
+      }, 1000);
+    }, 500);
+  }, [exit]);
 
   const load = useCallback(async () => {
     const res = await get("/accounts");
@@ -193,6 +233,9 @@ function App() {
       case "4":
         setMode("status");
         break;
+      case "5":
+        vibeStart();
+        break;
       case "0":
       case "q":
         exit();
@@ -233,7 +276,7 @@ function App() {
       );
 
   const menuBar = h(Box, {marginTop: 1},
-    h(Text, {color: "gray"}, " [1] Add  [2] Re-login  [3] Remover  [4] Status  [0] Sair "),
+    h(Text, {color: "gray"}, " [1] Add  [2] Re-login  [3] Remover  [4] Status  [5] Vibe-Start  [0] Sair "),
   );
 
   const statusLine = h(Box, {},
@@ -362,5 +405,54 @@ if (args.includes("--status")) {
   process.exit(0);
 }
 
+if (args.includes("--vibe")) {
+  _vibeRequested = true;
+  console.log("Vibe-Start direto...");
+  try { execSync(`taskkill /F /FI "PID ne ${process.pid}" /IM node.exe 2>NUL`, {stdio: "pipe"}); } catch {}
+  try { execSync(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`, {cwd: __dirname, windowsHide: true}); } catch {}
+  try {
+    const piDir = path.dirname(PI_MODELS_PATH);
+    if (!fs.existsSync(piDir)) fs.mkdirSync(piDir, {recursive: true});
+    const arenaCfg = {
+      baseUrl: "http://localhost:9228/v1", api: "openai-completions", apiKey: "dummy",
+      compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
+      models: [{id: "arena-default", name: "Arena AI Default Chat", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 8192, cost: {input: 0, output: 0}}],
+    };
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(PI_MODELS_PATH, "utf8")); } catch {}
+    const providers = existing.providers || {};
+    providers["arena-ai"] = arenaCfg;
+    fs.writeFileSync(PI_MODELS_PATH, JSON.stringify({...existing, providers}, null, 2), "utf8");
+    console.log("Pi.dev configurado.");
+  } catch (e) { console.log("Erro config:", e.message); }
+  console.log("Aguardando stack...");
+  setTimeout(async () => {
+    for (let i = 0; i < 30; i++) {
+      try {
+        await fetch("http://localhost:9228/v1/models");
+        console.log("Stack pronto!");
+        const pi = spawn("cmd", ["/c", "pi --offline --model arena-ai/arena-default"], {stdio: "inherit", cwd: process.cwd()});
+        pi.on("exit", () => process.exit(0));
+        return;
+      } catch { await new Promise(r => setTimeout(r, 2000)); }
+    }
+    console.log("Timeout aguardando stack.");
+    process.exit(1);
+  }, 5000);
+  await new Promise(() => {});
+}
+
 const {waitUntilExit} = render(h(App));
 await waitUntilExit();
+
+if (_vibeRequested) {
+  console.log("");
+  console.log("  Iniciando Pi.dev com Arena AI...");
+  console.log("");
+  const pi = spawn("cmd", ["/c", "pi --offline --model arena-ai/arena-default"], {
+    stdio: "inherit",
+    cwd: process.cwd(),
+    windowsHide: false,
+  });
+  pi.on("exit", () => process.exit(0));
+}

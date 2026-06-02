@@ -8,6 +8,7 @@
     "postinstall": "node setup-tor.cjs",
     "start": "node start.cjs",
     "login": "node arena-accounts.js",
+    "vibe": "node arena-accounts.js --vibe",
     "accounts:status": "node arena-accounts.js --status",
     "dev": "node start.cjs",
     "doctor": "node doctor.cjs",
