@@ -1,7 +1,9 @@
 import {render, Box, Text, useInput, useApp} from "ink";
 import {createElement as h, useState, useEffect, useCallback} from "react";
+import fs from "fs";
 
 const SESSION_URL = process.env.ARENA_SESSION_URL || "http://127.0.0.1:9230";
+const ACCOUNTS_PATH = new URL("./accounts.json", import.meta.url);
 
 async function get(pathname, timeoutMs = 10000) {
   try {
@@ -26,6 +28,27 @@ async function post(pathname, body, timeoutMs = 10000) {
 }
 
 function pad(s, n) { return String(s || "").padEnd(n); }
+function localAccounts() {
+  try {
+    if (!fs.existsSync(ACCOUNTS_PATH)) return [];
+    const list = JSON.parse(fs.readFileSync(ACCOUNTS_PATH, "utf8"));
+    return list.map((acc) => {
+      const cookies = acc.cookies || [];
+      return {
+        id: acc.id,
+        label: acc.label,
+        cookieCount: cookies.length,
+        hasArenaAuth: cookies.some((c) => c.name === "arena-auth-prod-v1.0"),
+        rateLimited: (acc.rateLimitedUntil || 0) > Date.now(),
+        rateLimitedUntil: acc.rateLimitedUntil || 0,
+        lastUsedAt: acc.lastUsedAt || 0,
+        createdAt: acc.createdAt || 0,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
 function statusColor(acc) {
   if (acc.rateLimited) return "yellow";
   if (acc.hasArenaAuth) return "green";
@@ -82,7 +105,18 @@ function App() {
 
   const load = useCallback(async () => {
     const res = await get("/accounts");
-    if (res.ok) setAccounts(res.data.accounts || []);
+    if (res.ok) {
+      setAccounts(res.data.accounts || []);
+      return;
+    }
+    const fallback = localAccounts();
+    setAccounts(fallback);
+    setMessage({
+      text: fallback.length > 0
+        ? `Session offline (${res.error}). Mostrando accounts.json local; use npm start para gerenciar login.`
+        : `Session offline (${res.error}). Nenhuma conta local encontrada.`,
+      color: "yellow",
+    });
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -318,13 +352,13 @@ function App() {
 const args = process.argv.slice(2);
 if (args.includes("--status")) {
   const res = await get("/accounts");
-  const list = res.ok ? (res.data?.accounts || []) : [];
+  const list = res.ok ? (res.data?.accounts || []) : localAccounts();
   console.log(`Contas: ${list.length}`);
   for (const acc of list) {
     const state = acc.rateLimited ? "rate-limited" : acc.hasArenaAuth ? "ok" : "no-auth";
     console.log(`  ${acc.label || acc.id}: ${state} (${acc.cookieCount} cookies)`);
   }
-  if (!res.ok) console.log(`Session service: ${res.error}`);
+  if (!res.ok) console.log(`Session service offline: ${res.error}; usando accounts.json local`);
   process.exit(0);
 }
 
