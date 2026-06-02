@@ -245,7 +245,7 @@ Exemplo completo do `models.json`:
         "input": ["text"],
         "contextWindow": 128000,
         "maxTokens": 8192,
-        "cost": { "input": 0, "output": 0 }
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
       }
     ]
   }
@@ -386,9 +386,21 @@ node -e "fetch('http://127.0.0.1:9230/tor/newnym',{method:'POST'}).then(r=>r.jso
 
 Isso envia `SIGNAL NEWNYM` para o ControlPort do Tor, limpa o estado de proxies ruins em memória e recria os runtimes das contas no próximo uso.
 
+## Estratégia de Rate Limit
+
+O proxy usa uma abordagem multicamadas para lidar com rate limits da Arena AI:
+
+**Camada 1 — Rotação de contas:** cada conta tem seu próprio runtime Playwright (página e contexto de navegador isolados). Quando uma conta recebe `429 prompt failed` (cota da conta esgotada), o proxy fecha o runtime dessa conta, marca rate limit de 60s e tenta a próxima conta disponível automaticamente.
+
+**Camada 2 — Rotação de IP via Tor:** quando o erro é `429 Too Many Requests` (limite por IP), o proxy fecha o runtime da conta atual, marca o proxy como ruim e tenta com outro proxy do pool. Como o Tor é o proxy padrão e cada nova conexão pode sair por um nó diferente (circuito), a rotação de proxy efetivamente troca o IP de saída. Se todos os proxies do pool falharem, um cooldown global de 60s é aplicado.
+
+**Camada 3 — NEWNYM manual:** a stack expõe `POST /tor/newnym` que força o Tor a construir um novo circuito (`SIGNAL NEWNYM`), limpa todos os proxies ruins da memória e recria todos os runtimes — um "reset completo" da camada de rede.
+
+Na prática: uma conta individual nunca trava a stack. Se o IP do Tor cair, a conta troca de proxy; se a conta estourar cota, troca de conta. O Tor é a "mágica" que mantém o IP fresco sem precisar de proxies pagos.
+
 ## Observações
 
-- Uma janela de navegador Playwright pode abrir durante login ou sessão.
+- Cada conta aberta mantém uma página do Playwright em segundo plano. Durante login, uma janela visível é aberta para você digitar no chat.
 - A Arena AI pode alterar seletores, endpoints ou políticas de limite.
 - Tor é mais lento que o IP real; os timeouts foram ajustados para essa latência.
 - Proxies gratuitos públicos foram removidos do fluxo padrão porque são instáveis e, em geral, já estão bloqueados.

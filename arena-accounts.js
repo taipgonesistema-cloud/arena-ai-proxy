@@ -407,38 +407,58 @@ if (args.includes("--status")) {
 
 if (args.includes("--vibe")) {
   _vibeRequested = true;
-  console.log("Vibe-Start direto...");
-  try { execSync(`taskkill /F /FI "PID ne ${process.pid}" /IM node.exe 2>NUL`, {stdio: "pipe"}); } catch {}
-  try { execSync(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`, {cwd: __dirname, windowsHide: true}); } catch {}
+  const pid = process.pid;
+  console.log("Vibe-Start direto... (PID: " + pid + ")");
+
+  function logAndRun(cmd) {
+    try { execSync(cmd, {stdio: "pipe", timeout: 10000, windowsHide: true}); }
+    catch (e) { process.stderr.write("  aviso: " + e.message.replace(/\r?\n.*/s, "") + "\n"); }
+  }
+
+  logAndRun(`taskkill /F /FI "PID ne ${pid}" /IM node.exe 2>NUL`);
+  logAndRun(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`);
+
   try {
     const piDir = path.dirname(PI_MODELS_PATH);
     if (!fs.existsSync(piDir)) fs.mkdirSync(piDir, {recursive: true});
-    const arenaCfg = {
-      baseUrl: "http://localhost:9228/v1", api: "openai-completions", apiKey: "dummy",
-      compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
-      models: [{id: "arena-default", name: "Arena AI Default Chat", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 8192, cost: {input: 0, output: 0}}],
-    };
     let existing = {};
     try { existing = JSON.parse(fs.readFileSync(PI_MODELS_PATH, "utf8")); } catch {}
     const providers = existing.providers || {};
-    providers["arena-ai"] = arenaCfg;
+    providers["arena-ai"] = {
+      baseUrl: "http://localhost:9228/v1", api: "openai-completions", apiKey: "dummy",
+      compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
+      models: [{id: "arena-default", name: "Arena AI Default Chat", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 8192, cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}}],
+    };
     fs.writeFileSync(PI_MODELS_PATH, JSON.stringify({...existing, providers}, null, 2), "utf8");
     console.log("Pi.dev configurado.");
   } catch (e) { console.log("Erro config:", e.message); }
-  console.log("Aguardando stack...");
-  setTimeout(async () => {
-    for (let i = 0; i < 30; i++) {
+
+  // heartbeat pra manter processo vivo enquanto stack sobe
+  const hb = setInterval(() => {}, 30000);
+
+  console.log("Aguardando stack (ate 2 min)...");
+  console.log("");
+
+  // poll sincrono
+  (async () => {
+    for (let i = 0; i < 60; i++) {
       try {
-        await fetch("http://localhost:9228/v1/models");
-        console.log("Stack pronto!");
+        await fetch("http://localhost:9228/v1/models", {signal: AbortSignal.timeout(5000)});
+        clearInterval(hb);
+        console.log("Stack pronto! Iniciando Pi.dev...\n");
         const pi = spawn("cmd", ["/c", "pi --offline --model arena-ai/arena-default"], {stdio: "inherit", cwd: process.cwd()});
-        pi.on("exit", () => process.exit(0));
+        pi.on("exit", (code) => process.exit(code || 0));
         return;
-      } catch { await new Promise(r => setTimeout(r, 2000)); }
+      } catch {
+        process.stderr.write(".");
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
-    console.log("Timeout aguardando stack.");
+    console.log("\nTimeout aguardando stack.");
     process.exit(1);
-  }, 5000);
+  })();
+
+  // mantém vivo
   await new Promise(() => {});
 }
 
