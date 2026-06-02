@@ -40,6 +40,26 @@ POST /v1/chat/completions
 POST /api/session/new
 ```
 
+## API Key Opcional
+
+Por padrão, o proxy roda sem autenticação. Para exigir chave, defina no `.env`:
+
+```text
+PROXY_API_KEY=sua-chave
+```
+
+Depois envie nas requisições:
+
+```text
+Authorization: Bearer sua-chave
+```
+
+ou:
+
+```text
+X-API-Key: sua-chave
+```
+
 ## Teste Rápido
 
 ```bat
