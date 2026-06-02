@@ -1,0 +1,17 @@
+{
+  "name": "arena-ai-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node arena-proxy.js",
+    "login": "node arena-session.cjs",
+    "dev": "node start.cjs",
+    "proxy": "node arena-proxy.js",
+    "session": "node arena-session.cjs",
+    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0"
+  }
+}
