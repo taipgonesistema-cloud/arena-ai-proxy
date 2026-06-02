@@ -76,7 +76,7 @@ process.on("SIGTERM", () => shutdown(0));
   spawnNode("session", ["arena-session.cjs"]);
   const session = await waitForSession();
   console.log(`[start] session ready: ${session.url || "unknown url"}`);
-  console.log("[start] if login is needed, finish it in the Playwright window; cookies auto-save to .env");
+  console.log("[start] sessão Playwright pronta; proxy iniciando");
 
   spawnNode("proxy", ["arena-proxy.js"], { PORT: PROXY_PORT });
 })();

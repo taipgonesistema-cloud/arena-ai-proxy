@@ -21,15 +21,15 @@ npm install
 npm run login
 ```
 
-Faça login na janela aberta e mantenha essa janela aberta. Os cookies serão salvos automaticamente no `.env`.
+Faça login na janela aberta. Quando os cookies forem salvos no `.env`, o navegador será fechado automaticamente.
 
 ## Iniciar Proxy
-
-Em outro terminal:
 
 ```bat
 npm start
 ```
+
+Esse comando inicia o proxy e uma sessão Playwright para gerar reCAPTCHA durante as requisições.
 
 ## Endpoints
 
@@ -88,10 +88,10 @@ pi --offline --model arena-ai/019b24bb-5caf-71c3-b854-37d0c7086f21
 
 ## Desenvolvimento
 
-Subir login e proxy juntos:
+Subir login e proxy juntos é o comportamento padrão:
 
 ```bat
-npm run dev
+npm start
 ```
 
 Checar sintaxe:

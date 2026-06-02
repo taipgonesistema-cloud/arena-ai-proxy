@@ -8,12 +8,14 @@ const PROFILE_DIR = process.env.ARENA_PROFILE_DIR || path.join(__dirname, ".play
 const BROWSER_CHANNEL = process.env.ARENA_BROWSER_CHANNEL || "chrome";
 const ENV_PATH = path.join(__dirname, ".env");
 const SITE_KEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0";
+const LOGIN_ONLY = process.argv.includes("--login-only") || process.env.ARENA_LOGIN_ONLY === "1";
 
 let context = null;
 let page = null;
 let lastCookieSavedAt = 0;
 let lastRecaptchaAt = 0;
 let browserStartedAt = 0;
+let server = null;
 
 function log(message) {
   console.log(`[arena-session] ${message}`);
@@ -112,6 +114,12 @@ async function waitForLoginAndSave() {
   while (Date.now() < deadline) {
     const result = await saveCookiesToEnv().catch(() => null);
     if (result?.ok) {
+      if (LOGIN_ONLY) {
+        log("login concluído; cookies salvos no .env; fechando navegador");
+        await context?.close().catch(() => {});
+        server?.close(() => process.exit(0));
+        setTimeout(() => process.exit(0), 1000).unref();
+      }
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -183,11 +191,12 @@ async function startBrowser() {
   });
   await page.goto(START_URL, { waitUntil: "domcontentloaded" });
   log(`página aberta: ${START_URL}`);
-  log("faça login na janela aberta; os cookies serão salvos automaticamente");
+  if (LOGIN_ONLY) log("faça login na janela aberta; após salvar os cookies, o navegador será fechado");
+  else log("sessão Playwright pronta para gerar reCAPTCHA");
   waitForLoginAndSave().catch((err) => log(`salvamento automático falhou: ${err.message}`));
 }
 
-http.createServer(async (req, res) => {
+server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") return json(res, 204, {});
   try {
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`);

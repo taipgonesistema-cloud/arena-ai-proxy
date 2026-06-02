@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node arena-proxy.js",
-    "login": "node arena-session.cjs",
+    "start": "node start.cjs",
+    "login": "node arena-session.cjs --login-only",
     "dev": "node start.cjs",
     "proxy": "node arena-proxy.js",
     "session": "node arena-session.cjs",
