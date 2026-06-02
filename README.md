@@ -1,12 +1,25 @@
 # Arena AI Proxy
 
-Proxy local compatível com API da OpenAI para usar modelos de chat da **Arena AI** com suporte a **múltiplas contas**, login manual por Playwright, rotação automática em caso de rate limit, streaming e tool calling.
+Proxy local compatível com a API da OpenAI para usar a Arena AI em clientes como Pi.dev, Kilo Code e qualquer ferramenta que aceite um endpoint OpenAI-compatible.
+
+O projeto usa sessões reais de navegador com Playwright, cookies salvos por conta, rotação entre contas e proxy Tor automático para contornar limites por IP quando necessário.
 
 ```text
 http://localhost:9228/v1
 ```
 
----
+## Recursos
+
+- API local OpenAI-compatible.
+- Suporte a `GET /v1/models`.
+- Suporte a `POST /v1/chat/completions`.
+- Respostas non-stream e streaming SSE.
+- Tool calling compatível com o formato da OpenAI.
+- Login manual por navegador Playwright.
+- Múltiplas contas com cookies salvos em `accounts.json`.
+- Rotação automática entre contas quando uma conta entra em rate limit.
+- Tor baixado no `npm install` e iniciado automaticamente no `npm start`.
+- Fallback local na TUI: as contas aparecem mesmo se o session service estiver offline.
 
 ## Instalação
 
@@ -14,118 +27,174 @@ http://localhost:9228/v1
 npm install
 ```
 
----
+Durante a instalação, o script `setup-tor.cjs` baixa e extrai o Tor Expert Bundle para a pasta `tor/`.
 
-## Adicionar Contas
+A pasta `tor/` é ignorada pelo Git. Os binários do Tor não são versionados.
 
-```bat
-npm run accounts
-```
-
-Menu interativo que permite:
-
-1. **Adicionar conta** — abre uma janela limpa do navegador pra você logar manualmente. Quando o login for detectado, os cookies são salvos automaticamente.
-2. **Re-fazer login** — se a conta expirou, refaz o login sem perder a configuração.
-3. **Remover conta** — remove uma conta do arquivo.
-4. **Status de rate limit** — mostra quais contas estão disponíveis e quais estão em cooldown.
-
-As contas ficam salvas em `accounts.json` (ignorado pelo Git). Cada conta armazena os cookies diretamente — sem email/senha no arquivo.
-
----
-
-## Iniciar o Proxy
+## Iniciar
 
 ```bat
 npm start
 ```
 
-Sobe dois serviços:
+O `npm start` faz tudo automaticamente:
+
+- inicia o Tor em `socks5://127.0.0.1:9050`, se o Tor estiver instalado em `tor/`;
+- define `PROXY=socks5://127.0.0.1:9050` quando nenhum proxy foi informado manualmente;
+- inicia o session service na porta `9230`;
+- inicia o proxy OpenAI-compatible na porta `9228`.
+
+Serviços:
 
 | Serviço | Porta | Função |
-|---|---|---|
-| Session (Playwright) | `9230` | gerencia contas, cookies, reCAPTCHA |
-| Proxy | `9228` | API OpenAI-compatible |
+|---|---:|---|
+| Tor | `9050` | Proxy SOCKS5 local |
+| Session service | `9230` | Playwright, contas, cookies e reCAPTCHA |
+| OpenAI proxy | `9228` | API OpenAI-compatible |
 
-O navegador Playwright já abre logado com os cookies da primeira conta disponível.
+## Contas
 
----
+Gerenciar contas:
+
+```bat
+npm run login
+```
+
+A TUI permite:
+
+- adicionar conta;
+- refazer login de uma conta;
+- remover conta;
+- consultar status das contas.
+
+As contas ficam salvas em:
+
+```text
+accounts.json
+```
+
+Esse arquivo é ignorado pelo Git. Ele contém cookies de sessão, não contém senhas.
+
+Consultar status rápido:
+
+```bat
+npm run accounts:status
+```
+
+Se o session service estiver offline, a TUI e o comando de status leem `accounts.json` diretamente e avisam que estão usando o fallback local. Para adicionar contas ou refazer login, o `npm start` precisa estar rodando, porque essas ações dependem do navegador Playwright.
+
+## Tor e Proxy
+
+Por padrão, o projeto usa apenas o Tor como proxy.
+
+Fluxo padrão:
+
+```bat
+npm install
+npm start
+```
+
+Não é necessário iniciar o Tor manualmente.
+
+Se quiser usar um proxy diferente, defina `PROXY` antes de iniciar:
+
+```bat
+set PROXY=socks5://127.0.0.1:9050
+npm start
+```
+
+Se quiser passar vários proxies manualmente:
+
+```bat
+set PROXY_LIST=socks5://host1:9050,http://host2:8080
+npm start
+```
+
+Quando um proxy recebe erro ou fica indisponível, ele é marcado como ruim em memória. Com apenas o Tor configurado, a stack pode continuar usando IP real caso o Tor seja marcado como ruim. Reiniciar o `npm start` limpa esse estado em memória.
 
 ## Endpoints
 
-```text
-GET  /v1/models            — Lista modelos disponíveis
-POST /v1/chat/completions   — Chat completo (non-stream, stream, tools)
-```
-
-### Non-stream
-
-```bat
-node -e "fetch('http://localhost:9228/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'arena-default',messages:[{role:'user',content:'responda exatamente: ok'}]})}).then(r=>r.text()).then(console.log)"
-```
-
-### Streaming
-
-```bat
-node -e "fetch('http://localhost:9228/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'arena-default',messages:[{role:'user',content:'conte de 1 a 5'}],stream:true})}).then(async r=>{for await(const c of r.body)process.stdout.write(c.toString())})"
-```
-
-### Tool Calling
-
-O proxy converte `<tool_call>{...}</tool_call>` para o formato OpenAI `tool_calls`. Funciona com Pi, Kilo Code e qualquer cliente OpenAI-compatible.
-
----
-
-## Autenticação
-
-Por padrão, o proxy roda **aberto** (sem chave). Pra exigir chave, defina no `.env`:
+### Listar modelos
 
 ```text
-PROXY_API_KEY=sua-chave
+GET /v1/models
 ```
 
-Envie nas requisições:
-
-```text
-Authorization: Bearer sua-chave
-```
-
----
-
-## Fluxo de Cookies
-
-1. Primeiro tenta pegar cookies de uma conta disponível em `accounts.json`
-2. Se não houver conta disponível, cai pro fallback da env `ARENA_COOKIES`
-3. Se nenhum dos dois existir, retorna erro
-
-Isso garante que as contas logadas manualmente sempre tenham prioridade sobre cookies de ambiente.
-
----
-
-## Modelos
-
-Listar modelos disponíveis:
+Exemplo:
 
 ```bat
 node -e "fetch('http://localhost:9228/v1/models').then(r=>r.json()).then(j=>console.log(j.data.length,'modelos'))"
 ```
 
-Modelo padrão (Max):
+### Chat completions
+
+```text
+POST /v1/chat/completions
+```
+
+Exemplo non-stream:
+
+```bat
+node -e "fetch('http://localhost:9228/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'arena-default',messages:[{role:'user',content:'responda exatamente: ok'}]})}).then(r=>r.text()).then(console.log)"
+```
+
+Exemplo streaming:
+
+```bat
+node -e "fetch('http://localhost:9228/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'arena-default',messages:[{role:'user',content:'responda exatamente: stream-ok'}],stream:true})}).then(r=>r.text()).then(console.log)"
+```
+
+## Tool Calling
+
+A Arena AI não fornece tool calling nativo no mesmo formato da OpenAI. O proxy injeta um contrato textual no prompt e converte respostas no formato abaixo para `tool_calls` OpenAI-compatible:
+
+```text
+<tool_call>{"name":"echo","arguments":{"text":"ok"}}</tool_call>
+```
+
+O proxy também filtra argumentos extras que não existam no schema da ferramenta. Isso evita chamadas inválidas, por exemplo `description` dentro de `arguments` quando o schema não permite essa chave.
+
+O suporte cobre:
+
+- `tool_choice: "none"`;
+- `tool_choice: "required"`;
+- `tool_choice` com função específica;
+- streaming com tool calls;
+- mensagens `developer` convertidas para instruções preservadas no prompt.
+
+## Modelo Padrão
+
+Alias padrão:
 
 ```text
 arena-default
 ```
 
-ID direto:
+ID usado pelo alias:
 
 ```text
 019b24bb-5caf-71c3-b854-37d0c7086f21
 ```
 
----
+## Autenticação do Proxy
 
-## Pi.dev / Kilo Code
+Por padrão, o proxy local não exige chave.
 
-Adicione no `~/.pi/agent/models.json` (ou `C:\Users\SEU_USER\.pi\agent\models.json`):
+Para exigir autenticação, crie ou edite `.env`:
+
+```text
+PROXY_API_KEY=sua-chave
+```
+
+Depois envie nas requisições:
+
+```text
+Authorization: Bearer sua-chave
+```
+
+## Pi.dev e Kilo Code
+
+Exemplo para `C:\Users\SEU_USUARIO\.pi\agent\models.json`:
 
 ```json
 {
@@ -152,34 +221,104 @@ Adicione no `~/.pi/agent/models.json` (ou `C:\Users\SEU_USER\.pi\agent\models.js
 }
 ```
 
-Testar:
+Teste:
 
-```bash
+```bat
 pi --offline --model arena-ai/arena-default -p "Responda exatamente: pi-ok"
 ```
-
----
 
 ## Scripts
 
 | Comando | Descrição |
 |---|---|
-| `npm start` | Sobe session + proxy |
-| `npm run accounts` | TUI de gerenciamento de contas |
-| `npm run accounts:status` | Status rápido das contas |
-| `npm run login` | TUI (se tiver contas) ou login legado |
-| `npm run check` | Valida sintaxe dos arquivos |
-
----
+| `npm install` | Instala dependências e baixa o Tor automaticamente |
+| `npm start` | Inicia Tor, session service e proxy |
+| `npm run login` | Abre a TUI de gerenciamento de contas |
+| `npm run accounts:status` | Mostra status rápido das contas |
+| `npm run proxy` | Inicia apenas o proxy OpenAI-compatible |
+| `npm run session` | Inicia apenas o session service |
+| `npm run check` | Valida a sintaxe dos arquivos principais |
 
 ## Estrutura
 
 ```text
-arena-proxy.js        → API OpenAI-compatible
-arena-session.cjs     → Playwright session + contas
-arena-accounts.cjs    → TUI de contas
-login.cjs             → Dispatcher de login
-start.cjs             → Orquestrador
-data/models-list.json → Lista de modelos versionada
-accounts.json         → Cookies das contas (ignorado pelo Git)
+arena-proxy.js         API OpenAI-compatible
+arena-session.cjs      Session service com Playwright, contas, Tor e reCAPTCHA
+arena-accounts.js      TUI de gerenciamento de contas
+start.cjs              Orquestrador: Tor + session + proxy
+setup-tor.cjs          Instalador automático do Tor Expert Bundle
+data/models-list.json  Lista versionada de modelos
+accounts.json          Cookies das contas, ignorado pelo Git
+tor/                   Binários do Tor, ignorado pelo Git
 ```
+
+## Arquivos Sensíveis
+
+Não versionar:
+
+- `accounts.json`;
+- `.env`;
+- `tor/`;
+- logs;
+- cookies;
+- tokens;
+- dumps de rede;
+- traces brutos.
+
+Esses itens já estão cobertos pelo `.gitignore`.
+
+## Solução de Problemas
+
+### `npm run login` mostra nenhuma conta
+
+Verifique se existe `accounts.json` na raiz do projeto:
+
+```bat
+dir accounts.json
+```
+
+Se o session service estiver offline, a TUI deve mostrar as contas locais e avisar que está usando fallback. Para adicionar ou refazer login, rode:
+
+```bat
+npm start
+```
+
+### Tor não inicia
+
+Reinstale o Tor automático:
+
+```bat
+rmdir /s /q tor
+npm install
+```
+
+Depois inicie novamente:
+
+```bat
+npm start
+```
+
+### `429 prompt failed`
+
+Esse erro geralmente indica limite da conta. O proxy tenta alternar para outra conta disponível. Se todas as contas retornarem o mesmo erro, adicione outra conta ou aguarde o limite expirar.
+
+### `429 Too Many Requests`
+
+Esse erro geralmente indica limite global ou por IP. O Tor é iniciado automaticamente para reduzir esse problema. Se o Tor também for limitado, reiniciar o Tor pode trocar o circuito, mas a disponibilidade depende dos nós de saída da rede Tor.
+
+### Conferir saúde da stack
+
+```bat
+node -e "fetch('http://127.0.0.1:9230/status').then(r=>r.json()).then(console.log)"
+```
+
+```bat
+node -e "fetch('http://127.0.0.1:9228/v1/models').then(r=>r.json()).then(console.log)"
+```
+
+## Observações
+
+- Uma janela de navegador Playwright pode abrir durante login ou sessão.
+- A Arena AI pode alterar seletores, endpoints ou políticas de limite.
+- Tor é mais lento que o IP real; os timeouts foram ajustados para essa latência.
+- Proxies gratuitos públicos foram removidos do fluxo padrão porque são instáveis e, em geral, já estão bloqueados.
