@@ -198,6 +198,23 @@ function deterministicToolCall(params) {
   };
 }
 
+function lastToolContent(messages) {
+  const toolMessage = [...(messages || [])].reverse().find((m) => m?.role === "tool" || m?.role === "function" || m?.role === "toolResult");
+  return messageContent(toolMessage?.content).trim();
+}
+
+function deterministicFinalResponse(params) {
+  const messages = Array.isArray(params?.messages) ? params.messages : [];
+  if (!hasToolResult(messages)) return "";
+  const recentUser = [...messages].reverse().find((m) => m?.role === "user");
+  const toolText = lastToolContent(messages);
+  if (!toolText) return "";
+  if (asksCurrentDirectory(messageContent(recentUser?.content))) {
+    return toolText;
+  }
+  return "";
+}
+
 function messageContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -267,7 +284,18 @@ function buildPrompt(params) {
     }
     const name = message?.name ? ` ${message.name}` : "";
     const content = messageContent(message?.content);
-    if (!content && role !== "tool") continue;
+    if (role === "tool" || role === "function" || role === "toolResult") {
+      let toolName = message?.name || "tool";
+      if (message?.tool_call_id) {
+        for (const previous of [...parts].reverse()) {
+          const match = String(previous).match(/"name"\s*:\s*"([^"]+)"/);
+          if (match) { toolName = match[1]; break; }
+        }
+      }
+      parts.push(`Tool Response (${toolName}):\n${content}`);
+      continue;
+    }
+    if (!content) continue;
     parts.push(`${role}${name}:\n${content}`);
   }
 
@@ -377,6 +405,7 @@ function usageFromText(prompt, completion, finish = null) {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
+    prompt_tokens_details: { cached_tokens: 0 },
     estimated: realPrompt === undefined || realCompletion === undefined,
   };
 }
@@ -528,6 +557,10 @@ function streamJson(res, data) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+function streamChoice(delta, finishReason = null) {
+  return { index: 0, delta, logprobs: null, finish_reason: finishReason };
+}
+
 function streamOpenAICompletion(res, streamState, text, parsed, includeRole = true) {
   if (!res.headersSent) {
     res.writeHead(200, {
@@ -536,6 +569,7 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
       "Connection": "keep-alive",
       "Access-Control-Allow-Origin": "*",
     });
+    res.write(": heartbeat\n\n");
   }
   if (includeRole) {
     streamJson(res, {
@@ -543,7 +577,7 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
       object: "chat.completion.chunk",
       created: streamState.created,
       model: streamState.model,
-      choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+      choices: [streamChoice({ role: "assistant", content: "" })],
     });
   }
   if (parsed.toolCalls.length > 0) {
@@ -553,18 +587,14 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
         object: "chat.completion.chunk",
         created: streamState.created,
         model: streamState.model,
-        choices: [{
-          index: 0,
-          delta: {
+          choices: [streamChoice({
             tool_calls: [{
               index,
               id: call.id,
               type: call.type,
               function: call.function,
             }],
-          },
-          finish_reason: null,
-        }],
+          })],
       });
     });
   } else if (parsed.textContent) {
@@ -573,7 +603,7 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
       object: "chat.completion.chunk",
       created: streamState.created,
       model: streamState.model,
-      choices: [{ index: 0, delta: { content: parsed.textContent }, finish_reason: null }],
+      choices: [streamChoice({ content: parsed.textContent })],
     });
   }
   streamJson(res, {
@@ -581,7 +611,7 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
     object: "chat.completion.chunk",
     created: streamState.created,
     model: streamState.model,
-    choices: [{ index: 0, delta: {}, finish_reason: parsed.toolCalls.length > 0 ? "tool_calls" : "stop" }],
+    choices: [streamChoice({}, parsed.toolCalls.length > 0 ? "tool_calls" : "stop")],
   });
   res.write("data: [DONE]\n\n");
   res.end();
@@ -667,6 +697,7 @@ http.createServer((req, res) => {
 
           const modelId = modelIdFromRequest(params);
           const stream = params.stream === true;
+          const deterministicFinal = deterministicFinalResponse(params);
           const deterministicCall = deterministicToolCall(params);
 
           logRequest("request:start", {
@@ -678,6 +709,34 @@ http.createServer((req, res) => {
             messages: Array.isArray(params.messages) ? params.messages.length : 0,
             promptChars: prompt.length,
           });
+
+          if (deterministicFinal) {
+            const streamState = {
+              id: `chatcmpl-${Date.now()}`,
+              created: Math.floor(Date.now() / 1000),
+              model: params.model || "arena",
+            };
+            const usage = usageFromText(prompt, deterministicFinal);
+            logRequest("request:deterministic-final", { model: params.model || "arena-default", contentChars: deterministicFinal.length });
+            if (stream) {
+              streamOpenAICompletion(res, streamState, deterministicFinal, { textContent: deterministicFinal, toolCalls: [] });
+            } else {
+              json(res, 200, {
+                id: streamState.id,
+                object: "chat.completion",
+                created: streamState.created,
+                model: streamState.model,
+                choices: [{
+                  index: 0,
+                  message: { role: "assistant", content: deterministicFinal },
+                  logprobs: null,
+                  finish_reason: "stop",
+                }],
+                usage,
+              });
+            }
+            return;
+          }
 
           if (deterministicCall) {
             const streamState = {
@@ -714,6 +773,7 @@ http.createServer((req, res) => {
           if (stream) {
             const collected = [];
             const hasTools = Array.isArray(params.tools) && params.tools.length > 0;
+            const afterToolResult = hasToolResult(params.messages);
             const streamState = {
               id: `chatcmpl-${Date.now()}`,
               created: Math.floor(Date.now() / 1000),
@@ -727,12 +787,14 @@ http.createServer((req, res) => {
               "Access-Control-Allow-Origin": "*",
             });
 
+            res.write(": heartbeat\n\n");
+
             streamJson(res, {
               id: streamState.id,
               object: "chat.completion.chunk",
               created: streamState.created,
               model: streamState.model,
-              choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+              choices: [streamChoice({ role: "assistant", content: "" })],
             });
 
             await new Promise((resolvePromise, rejectPromise) => {
@@ -743,20 +805,20 @@ http.createServer((req, res) => {
                 recaptchaToken,
                 (text) => {
                   collected.push(text);
-                  if (!hasTools) {
+                  if (!hasTools || afterToolResult) {
                     streamJson(res, {
                       id: streamState.id,
                       object: "chat.completion.chunk",
                       created: streamState.created,
                       model: streamState.model,
-                      choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+                      choices: [streamChoice({ content: text })],
                     });
                   }
                 },
                 (finish) => {
                   const fullText = collected.join("");
                   const usage = usageFromText(prompt, fullText, finish);
-                  if (hasTools) {
+                  if (hasTools && !afterToolResult) {
                     const parsed = parseToolCalls(fullText);
                     logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: parsed.toolCalls.length > 0 ? "tool_calls" : "stop", contentChars: parsed.textContent.length, toolCalls: parsed.toolCalls.length, usage });
                     streamOpenAICompletion(res, streamState, fullText, parsed, false);
@@ -767,7 +829,8 @@ http.createServer((req, res) => {
                       object: "chat.completion.chunk",
                       created: streamState.created,
                       model: streamState.model,
-                      choices: [{ index: 0, delta: {}, finish_reason: finish?.finishReason || "stop" }],
+                      choices: [streamChoice({}, finish?.finishReason || "stop")],
+                      usage,
                     });
                     res.write("data: [DONE]\n\n");
                     res.end();
