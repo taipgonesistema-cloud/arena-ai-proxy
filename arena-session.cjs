@@ -560,7 +560,7 @@ server = http.createServer(async (req, res) => {
         loginPage.goto("https://arena.ai/text/direct", { waitUntil: "domcontentloaded", timeout: 30000 })
       );
       log(`janela de login aberta para: ${label}`);
-      log("faça login manualmente na janela aberta");
+      log("faça login manualmente na janela aberta — digite algo no chat e pressione Enter");
 
       // Wait up to 10 minutes for manual login
       const id = genId();

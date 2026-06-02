@@ -124,7 +124,7 @@ function App() {
   async function addAccount(label) {
     setMode("busy");
     setBusyText(`Abrindo navegador para login: "${label}"...`);
-    setMessage({text: "Faça login na janela aberta. Aguardando...", color: "cyan"});
+    setMessage({text: "Faça login na janela aberta. Digite algo no chat e pressione Enter para autenticar. Aguardando...", color: "cyan"});
     const res = await post("/accounts/login", {label}, 600000);
     if (res.ok) {
       setMessage({text: `✅ Conta "${label}" adicionada (${res.data?.cookieCount} cookies)`, color: "green"});
@@ -139,7 +139,7 @@ function App() {
     const acc = accounts.find((a) => a.id === id);
     setMode("busy");
     setBusyText(`Re-fazendo login: "${acc?.label || id}"...`);
-    setMessage({text: "Faça login na janela aberta.", color: "cyan"});
+    setMessage({text: "Faça login na janela aberta. Digite algo no chat e pressione Enter para autenticar.", color: "cyan"});
     const res = await post("/accounts/re-login", {id}, 600000);
     if (res.ok) {
       setMessage({text: `✅ Re-login OK: ${acc?.label || id}`, color: "green"});
