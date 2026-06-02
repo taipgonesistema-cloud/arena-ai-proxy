@@ -45,7 +45,7 @@ Use Portuguese when the user writes Portuguese. Keep final answers concise and f
 
 const PI_TOOL_CONTRACT = `You are running through an OpenAI-compatible proxy backed by Arena AI.
 Tools are available for you to execute.
-When a tool is needed, output only tool calls and nothing else.
+When a tool is needed, your ENTIRE response must be ONLY the tool call and nothing else.
 Do not answer the result of a command or file operation yourself; that result only exists after the tool executes.
 Prefer small, verifiable tool calls over one huge shell command.
 For multi-file work, create directories, write one or a few files, then verify with a listing command.
