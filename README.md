@@ -11,7 +11,7 @@ http://localhost:9228/v1
 ## Instalação
 
 ```bat
-cd Arena-AI-PROXY
+cd arena-ai-proxy
 npm install
 ```
 
