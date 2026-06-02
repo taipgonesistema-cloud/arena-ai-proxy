@@ -717,6 +717,7 @@ http.createServer((req, res) => {
             await new Promise((resolvePromise, rejectPromise) => {
               let currentId = null;
               let currentCookie = null;
+              let currentRecaptchaToken = recaptchaToken;
               const doCall = async (retriesLeft) => {
                 if (!currentCookie) {
                   let account;
@@ -734,7 +735,7 @@ http.createServer((req, res) => {
                   prompt,
                   modelId,
                   currentCookie,
-                  recaptchaToken,
+                  currentRecaptchaToken,
                   (text) => {
                     collectedLocal.push(text);
                     if (!hasTools || afterToolResult) {
@@ -770,11 +771,12 @@ http.createServer((req, res) => {
                     }
                     resolvePromise();
                   },
-                  (err) => {
+                  async (err) => {
                     const is429 = /429|Too Many Requests|rate.?limit/i.test(err.message);
                     if (is429 && retriesLeft > 0) {
                       const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retriesLeft));
                       logRequest("arena:retry", { account: currentId, retriesLeft, delay, err: err.message.slice(0, 100) });
+                      try { currentRecaptchaToken = await getRecaptchaToken(); } catch {}
                       setTimeout(() => doCall(retriesLeft - 1), delay);
                     } else {
                       if (is429) markRateLimited(currentId).catch(() => {});
@@ -800,7 +802,7 @@ http.createServer((req, res) => {
             if (!account?.cookieHeader) throw new Error("No Arena cookie available");
             const attemptAccountId = account.id;
             for (let retries = 3; retries > 0; retries--) {
-              result = await arenaDirectCall(prompt, modelId, account.cookieHeader, recaptchaToken);
+              result = await arenaDirectCall(prompt, modelId, account.cookieHeader, retries < 3 ? await getRecaptchaToken() : recaptchaToken);
               if (result.status === 200) break;
               const is429 = result.status === 429 || /Too Many Requests|rate.?limit/i.test(result.text);
               if (!is429 || retries <= 1) {
