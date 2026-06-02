@@ -495,7 +495,7 @@ function streamJson(res, data) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-function streamOpenAICompletion(res, streamState, text, parsed) {
+function streamOpenAICompletion(res, streamState, text, parsed, includeRole = true) {
   if (!res.headersSent) {
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -504,13 +504,15 @@ function streamOpenAICompletion(res, streamState, text, parsed) {
       "Access-Control-Allow-Origin": "*",
     });
   }
-  streamJson(res, {
-    id: streamState.id,
-    object: "chat.completion.chunk",
-    created: streamState.created,
-    model: streamState.model,
-    choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-  });
+  if (includeRole) {
+    streamJson(res, {
+      id: streamState.id,
+      object: "chat.completion.chunk",
+      created: streamState.created,
+      model: streamState.model,
+      choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+    });
+  }
   if (parsed.toolCalls.length > 0) {
     parsed.toolCalls.forEach((call, index) => {
       streamJson(res, {
@@ -657,22 +659,20 @@ http.createServer((req, res) => {
               model: params.model || "arena",
             };
 
-            if (!hasTools) {
-              res.writeHead(200, {
-                "Content-Type": "text/event-stream; charset=utf-8",
-                "Cache-Control": "no-cache, no-transform",
-                "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
-              });
+            res.writeHead(200, {
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              "Connection": "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            });
 
-              streamJson(res, {
-                id: streamState.id,
-                object: "chat.completion.chunk",
-                created: streamState.created,
-                model: streamState.model,
-                choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-              });
-            }
+            streamJson(res, {
+              id: streamState.id,
+              object: "chat.completion.chunk",
+              created: streamState.created,
+              model: streamState.model,
+              choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+            });
 
             await new Promise((resolvePromise, rejectPromise) => {
               arenaStreamCall(
@@ -698,7 +698,7 @@ http.createServer((req, res) => {
                   if (hasTools) {
                     const parsed = parseToolCalls(fullText);
                     logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: parsed.toolCalls.length > 0 ? "tool_calls" : "stop", contentChars: parsed.textContent.length, toolCalls: parsed.toolCalls.length, usage });
-                    streamOpenAICompletion(res, streamState, fullText, parsed);
+                    streamOpenAICompletion(res, streamState, fullText, parsed, false);
                   } else {
                     logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: finish?.finishReason || "stop", contentChars: fullText.length, toolCalls: 0, usage });
                     streamJson(res, {
