@@ -21,7 +21,7 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const PORT = Number(process.env.PORT || 9227);
+const PORT = Number(process.env.PORT || 9228);
 const RELAY = (process.env.BROWSER_RELAY_URL || "http://localhost:9223").replace(/\/+$/, "");
 const PROXY_API_KEY = process.env.PROXY_API_KEY || "";
 const ARENA_COOKIE = process.env.ARENA_COOKIE || "";
@@ -644,7 +644,7 @@ function resolveModelId(openAiModel) {
 }
 
 function loadArenaTextModels() {
-  const file = path.join(__dirname, "models-list.json");
+  const file = path.join(__dirname, "data", "models-list.json");
   if (!fs.existsSync(file)) return [];
   try {
     const raw = fs.readFileSync(file, "utf8");
@@ -660,7 +660,7 @@ function loadArenaTextModels() {
         return true;
       });
   } catch (err) {
-    log("Could not load models-list.json:", err.message);
+    log("Could not load data/models-list.json:", err.message);
     return [];
   }
 }

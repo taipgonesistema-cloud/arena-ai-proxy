@@ -16,3 +16,7 @@ _rsc_script.txt
 *.network-response
 tmp/
 temp/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
