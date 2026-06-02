@@ -27,7 +27,7 @@ http://localhost:9228/v1
 npm install
 ```
 
-Durante a instalação, o script `setup-tor.cjs` baixa e extrai o Tor Expert Bundle para a pasta `tor/`.
+Durante a instalação, o script `setup-tor.cjs` baixa e extrai o Tor Expert Bundle para a pasta `tor/` e configura o `torrc` com `ControlPort 127.0.0.1:9051` para suporte a `SIGNAL NEWNYM`.
 
 A pasta `tor/` é ignorada pelo Git. Os binários do Tor não são versionados.
 
@@ -48,7 +48,8 @@ Serviços:
 
 | Serviço | Porta | Função |
 |---|---:|---|
-| Tor | `9050` | Proxy SOCKS5 local |
+| Tor SOCKS5 | `9050` | Proxy SOCKS5 local |
+| Tor Control | `9051` | Controle do Tor (NEWNYM, status) |
 | Session service | `9230` | Playwright, contas, cookies e reCAPTCHA |
 | OpenAI proxy | `9228` | API OpenAI-compatible |
 
@@ -60,12 +61,16 @@ Gerenciar contas:
 npm run login
 ```
 
+Ao abrir a janela do navegador, digite algo no chat e pressione **Enter** para o login ser reconhecido.
+
 A TUI permite:
 
 - adicionar conta;
 - refazer login de uma conta;
 - remover conta;
 - consultar status das contas.
+
+**Importante:** ao adicionar ou refazer login, uma janela do navegador será aberta. Digite algo no chat da Arena e pressione **Enter** para que o cookie de autenticação seja gerado e capturado automaticamente.
 
 As contas ficam salvas em:
 
@@ -159,7 +164,9 @@ O suporte cobre:
 - `tool_choice: "none"`;
 - `tool_choice: "required"`;
 - `tool_choice` com função específica;
-- streaming com tool calls;
+- streaming com tool calls (com `usage` incluso no chunk final);
+- parse robusto de JSON com `findMatchingBrace` — não quebra com `}` dentro de strings (CSS, HTML, comandos shell);
+- prompt otimizado para o modelo emitir **apenas** o tool call, sem texto antes/depois;
 - mensagens `developer` convertidas para instruções preservadas no prompt.
 
 ## Modelo Padrão
