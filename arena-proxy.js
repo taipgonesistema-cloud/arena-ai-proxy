@@ -278,14 +278,31 @@ function allowedToolArgs(name, args, tools = []) {
   return filtered;
 }
 
+function findMatchingBrace(raw, start) {
+  if (raw[start] !== "{") return -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\" && inString) { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
 function parseToolCalls(text, tools = []) {
   const calls = [];
   let remaining = text || "";
   const parts = [];
   const parsePayload = (raw) => {
     const attempts = [raw, raw.replace(/>\s*$/, "")];
-    const lastBrace = raw.lastIndexOf("}");
-    if (lastBrace !== -1) attempts.push(raw.slice(0, lastBrace + 1));
+    const braceEnd = findMatchingBrace(raw, raw.indexOf("{"));
+    if (braceEnd !== -1) attempts.push(raw.slice(0, braceEnd + 1));
     for (const attempt of attempts) {
       try { return JSON.parse(attempt); }
       catch {}
@@ -429,7 +446,7 @@ function streamChoice(delta, finishReason = null) {
   return { index: 0, delta, logprobs: null, finish_reason: finishReason };
 }
 
-function streamOpenAICompletion(res, streamState, text, parsed, includeRole = true) {
+function streamOpenAICompletion(res, streamState, text, parsed, includeRole = true, usage = null) {
   if (!res.headersSent) {
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -445,7 +462,7 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
       object: "chat.completion.chunk",
       created: streamState.created,
       model: streamState.model,
-      choices: [streamChoice({ role: "assistant", content: "" })],
+      choices: [streamChoice({ role: "assistant", content: null })],
     });
   }
   if (parsed.toolCalls.length > 0) {
@@ -455,14 +472,26 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
         object: "chat.completion.chunk",
         created: streamState.created,
         model: streamState.model,
-          choices: [streamChoice({
-            tool_calls: [{
-              index,
-              id: call.id,
-              type: call.type,
-              function: call.function,
-            }],
-          })],
+        choices: [streamChoice({
+          tool_calls: [{
+            index,
+            id: call.id,
+            type: call.type,
+            function: { name: call.function.name, arguments: "" },
+          }],
+        })],
+      });
+      streamJson(res, {
+        id: streamState.id,
+        object: "chat.completion.chunk",
+        created: streamState.created,
+        model: streamState.model,
+        choices: [streamChoice({
+          tool_calls: [{
+            index,
+            function: { arguments: call.function.arguments },
+          }],
+        })],
       });
     });
   } else if (parsed.textContent) {
@@ -474,13 +503,15 @@ function streamOpenAICompletion(res, streamState, text, parsed, includeRole = tr
       choices: [streamChoice({ content: parsed.textContent })],
     });
   }
-  streamJson(res, {
+  const finishData = {
     id: streamState.id,
     object: "chat.completion.chunk",
     created: streamState.created,
     model: streamState.model,
     choices: [streamChoice({}, parsed.toolCalls.length > 0 ? "tool_calls" : "stop")],
-  });
+  };
+  if (usage) finishData.usage = usage;
+  streamJson(res, finishData);
   res.write("data: [DONE]\n\n");
   res.end();
 }
@@ -604,12 +635,12 @@ http.createServer((req, res) => {
             res.write(": heartbeat\n\n");
 
             if (hasTools && !afterToolResult && toolParsed.toolCalls.length > 0) {
-              streamOpenAICompletion(res, streamState, fullText, toolParsed, true);
+              streamOpenAICompletion(res, streamState, fullText, toolParsed, true, usage);
             } else {
               streamJson(res, {
                 id: streamState.id, object: "chat.completion.chunk",
                 created: streamState.created, model: streamState.model,
-                choices: [streamChoice({ role: "assistant", content: "" })],
+                choices: [streamChoice({ role: "assistant", content: null })],
               });
               if (fullText) {
                 streamJson(res, {
