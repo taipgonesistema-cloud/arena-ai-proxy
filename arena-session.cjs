@@ -15,8 +15,80 @@ let defaultPage = null;
 let lastRecaptchaAt = 0;
 let browserStartedAt = 0;
 let server = null;
+let currentAccountId = null;
+const accountRuntimes = new Map();
+let globalRateLimitedUntil = 0;
+
+function classifyArenaError(status, text) {
+  const body = String(text || "");
+  const tooManyRequests = status === 429 && /Too Many Requests/i.test(body);
+  const promptFailed = status === 429 && /prompt failed/i.test(body);
+  const rateLimit = status === 429 || /rate.?limit/i.test(body);
+  const authExpired = status === 401 || /User not found/i.test(body);
+  return { tooManyRequests, promptFailed, rateLimit, authExpired };
+}
+
+function isAuthCookie(name) {
+  return name && !name.startsWith("cf_") && !name.startsWith("__cf") && !name.startsWith("_cf");
+}
+
+async function switchAccount(account) {
+  if (currentAccountId === account.id && defaultPage && !defaultPage.isClosed()) return;
+  log(`trocando conta: ${account.label} (cookies apenas, sem reload)`);
+  if (defaultContext) {
+    const valid = (account.cookies || []).filter(c => isAuthCookie(c.name) && c.value);
+    if (valid.length > 0) await defaultContext.addCookies(valid).catch(() => {});
+  }
+  currentAccountId = account.id;
+}
 
 const accounts = new Map();
+
+function validStoredCookies(cookies) {
+  const nowSeconds = Date.now() / 1000;
+  return (cookies || []).filter((cookie) => {
+    if (!cookie?.name || !cookie?.value) return false;
+    if (typeof cookie.expires === "number" && cookie.expires > 0 && cookie.expires < nowSeconds) return false;
+    return true;
+  });
+}
+
+async function closeAccountRuntime(id) {
+  const runtime = accountRuntimes.get(id);
+  if (!runtime) return;
+  accountRuntimes.delete(id);
+  await runtime.context?.close?.().catch(() => {});
+}
+
+async function getAccountRuntime(account) {
+  const existing = accountRuntimes.get(account.id);
+  if (existing?.page && !existing.page.isClosed()) return existing;
+  if (existing) await closeAccountRuntime(account.id);
+
+  const context = await browser.newContext({ viewport: { width: 1280, height: 700 } });
+  const cookies = validStoredCookies(account.cookies || []);
+  if (cookies.length > 0) await context.addCookies(cookies).catch(() => {});
+  const page = await context.newPage();
+  await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+  const runtime = { context, page };
+  accountRuntimes.set(account.id, runtime);
+  log(`runtime pronto para conta: ${account.label}`);
+  return runtime;
+}
+
+async function getPageRecaptchaToken(page, label = "page") {
+  await page.waitForFunction(
+    () => window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute,
+    null,
+    { timeout: 30000 }
+  );
+  const token = await page.evaluate((siteKey) => {
+    return window.grecaptcha.enterprise.execute(siteKey, { action: "chat_submit" });
+  }, SITE_KEY);
+  lastRecaptchaAt = Date.now();
+  log(`reCAPTCHA ${label} gerado (${String(token || "").length} caracteres)`);
+  return token;
+}
 
 function log(message) {
   console.log(`[arena-session] ${message}`);
@@ -156,6 +228,7 @@ function getNextAvailableAccount() {
   return {
     id: chosen.id,
     label: chosen.label,
+    cookies: chosen.cookies || [],
     cookieHeader: cookieHeader(chosen.cookies || []),
     cookieCount: (chosen.cookies || []).length,
     hasArenaAuth: (chosen.cookies || []).some((c) => c.name === "arena-auth-prod-v1.0"),
@@ -168,22 +241,16 @@ async function getAllCookies(ctx) {
   catch { return []; }
 }
 
-async function recaptchaToken() {
+async function getMainRecaptchaToken() {
   if (!defaultPage || defaultPage.isClosed()) throw new Error("Arena page is not open");
-  await defaultPage.waitForFunction(() => window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute, null, { timeout: 30000 });
-  const token = await defaultPage.evaluate((siteKey) => {
-    return window.grecaptcha.enterprise.execute(siteKey, { action: "chat_submit" });
-  }, SITE_KEY);
-  lastRecaptchaAt = Date.now();
-  log(`reCAPTCHA gerado (${String(token || "").length} caracteres)`);
-  return token;
+  return getPageRecaptchaToken(defaultPage, "principal");
 }
 
 async function createDefaultContext() {
   if (!browser) return;
   if (!defaultContext) {
     defaultContext = await browser.newContext({
-      viewport: { width: 1366, height: 900 },
+      viewport: { width: 1280, height: 700 },
     });
     defaultPage = defaultContext.pages()[0] || await defaultContext.newPage();
     defaultPage.on("close", () => {
@@ -209,13 +276,12 @@ async function startBrowser() {
   const launchOptions = {
     headless: false,
     channel: BROWSER_CHANNEL,
-    viewport: { width: 1366, height: 900 },
     args: [
       "--disable-blink-features=AutomationControlled",
       "--disable-infobars",
       "--no-default-browser-check",
       "--no-first-run",
-      "--start-maximized",
+      "--window-size=1280,800",
     ],
     ignoreDefaultArgs: ["--enable-automation"],
   };
@@ -236,8 +302,9 @@ async function startBrowser() {
   if (first && defaultPage) {
     try {
       await defaultContext.addCookies(
-        (accounts.get(first.id)?.cookies || []).filter(c => c.name && c.value)
+        (accounts.get(first.id)?.cookies || []).filter(c => isAuthCookie(c.name) && c.value)
       );
+      currentAccountId = first.id;
       await defaultPage.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
       log(`cookies da conta "${first.label}" aplicados na página principal`);
     } catch (err) {
@@ -259,6 +326,8 @@ server = http.createServer(async (req, res) => {
         startedAt: browserStartedAt,
         url: defaultPage?.url?.() || null,
         pageOpen: !!defaultPage && !defaultPage.isClosed(),
+        globalRateLimited: globalRateLimitedUntil > Date.now(),
+        globalRateLimitedUntil,
         accounts: accountsStatus(),
         accountCount: accounts.size,
       });
@@ -270,7 +339,7 @@ server = http.createServer(async (req, res) => {
     }
 
     if (pathname === "/recaptcha") {
-      const token = await recaptchaToken();
+      const token = await getMainRecaptchaToken();
       return json(res, 200, { ok: true, token, generatedAt: lastRecaptchaAt });
     }
 
@@ -304,6 +373,7 @@ server = http.createServer(async (req, res) => {
         rateLimitedUntil: existing?.rateLimitedUntil || 0,
       });
       saveAccountsToDisk();
+      await closeAccountRuntime(id);
       log(`conta salva: ${label} (${cookies.length} cookies)`);
       return json(res, 200, { ok: true, id, label, cookieCount: cookies.length });
     }
@@ -317,13 +387,11 @@ server = http.createServer(async (req, res) => {
       const label = body.label || `Conta ${accounts.size + 1}`;
 
       const ctx = await browser.newContext({
-        viewport: { width: 1366, height: 900 },
+        viewport: { width: 1280, height: 700 },
       });
       const loginPage = ctx.pages()[0] || await ctx.newPage();
-      await loginPage.goto("https://arena.ai/auth/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() =>
-        loginPage.goto("https://arena.ai/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() =>
-          loginPage.goto("https://arena.ai/text/direct", { waitUntil: "domcontentloaded", timeout: 30000 })
-        )
+      await loginPage.goto("https://arena.ai/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() =>
+        loginPage.goto("https://arena.ai/text/direct", { waitUntil: "domcontentloaded", timeout: 30000 })
       );
       log(`janela de login aberta para: ${label}`);
       log("faça login manualmente na janela aberta");
@@ -364,10 +432,10 @@ server = http.createServer(async (req, res) => {
       if (!existing) return json(res, 404, { ok: false, error: "Account not found" });
 
       const ctx = await browser.newContext({
-        viewport: { width: 1366, height: 900 },
+        viewport: { width: 1280, height: 700 },
       });
       const loginPage = ctx.pages()[0] || await ctx.newPage();
-      await loginPage.goto("https://arena.ai/auth/login", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() =>
+      await loginPage.goto("https://arena.ai/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() =>
         loginPage.goto("https://arena.ai/text/direct", { waitUntil: "domcontentloaded", timeout: 30000 })
       );
       log(`re-login: ${existing.label}`);
@@ -380,6 +448,7 @@ server = http.createServer(async (req, res) => {
           existing.rateLimitedUntil = 0;
           existing.lastUsedAt = 0;
           saveAccountsToDisk();
+          await closeAccountRuntime(existing.id);
           await ctx.close().catch(() => {});
           log(`re-login OK: ${existing.label}`);
           return json(res, 200, { ok: true, id: existing.id, label: existing.label, cookieCount: cookies.length });
@@ -397,6 +466,7 @@ server = http.createServer(async (req, res) => {
       if (!removed) return json(res, 404, { ok: false, error: "Account not found" });
       accounts.delete(body.id);
       saveAccountsToDisk();
+      await closeAccountRuntime(body.id);
       log(`conta removida: ${removed.label}`);
       return json(res, 200, { ok: true, id: body.id, label: removed.label });
     }
@@ -422,6 +492,129 @@ server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, id, rateLimited: true });
     }
 
+    // POST /arena/chat  { prompt, modelId }
+    // Makes the Arena API call through the default page (bypasses Cloudflare).
+    if (pathname === "/arena/chat" && req.method === "POST") {
+      if (!browser) return json(res, 500, { ok: false, error: "Browser not started" });
+      if (!defaultPage || defaultPage.isClosed()) {
+        return json(res, 200, { ok: false, status: 503, text: "Page not open", accountId: null, accountLabel: null, is429: false });
+      }
+
+      const body = await parseBody(req);
+      const { prompt, modelId, id, userMessageId, modelMessageId } = body;
+      if (!prompt) return json(res, 400, { ok: false, error: "prompt required" });
+      if (!modelId) return json(res, 400, { ok: false, error: "modelId required" });
+
+      if (globalRateLimitedUntil > Date.now()) {
+        return json(res, 200, {
+          ok: false,
+          status: 429,
+          text: JSON.stringify({ error: "Too Many Requests", message: "Arena global cooldown active" }),
+          accountId: null,
+          accountLabel: null,
+          is429: true,
+          globalRateLimitedUntil,
+        });
+      }
+
+      const maxAttempts = Math.max(1, accounts.size);
+      let lastResult = null;
+      let lastAccount = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const account = getNextAvailableAccount();
+        if (!account) break;
+
+        account.lastUsedAt = Date.now();
+        saveAccountsToDisk();
+        const runtime = await getAccountRuntime(account);
+        const page = runtime.page;
+
+        // Generate a fresh reCAPTCHA token per account attempt from the same
+        // page/context that will send the request. Tokens can be context-bound.
+        let recaptchaToken = "";
+        try {
+          recaptchaToken = await getPageRecaptchaToken(page, account.label);
+        } catch (e) {
+          log(`reCAPTCHA account page warn: ${e.message}`);
+          try {
+            await page.goto(START_URL, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {});
+            recaptchaToken = await getPageRecaptchaToken(page, `${account.label}:reload`);
+          } catch (fallbackErr) {
+            log(`reCAPTCHA account page reload warn: ${fallbackErr.message}`);
+            try {
+              recaptchaToken = await getMainRecaptchaToken();
+            } catch (mainErr) {
+              log(`reCAPTCHA main page warn: ${mainErr.message}`);
+            }
+          }
+        }
+
+        // Make the API call inside the browser page (uses real browser fetch with Cloudflare clearance)
+        const result = await page.evaluate(async ({ prompt, modelId, id, userMsgId, modelMsgId, recaptchaToken }) => {
+          const response = await fetch("https://arena.ai/nextjs-api/stream/create-evaluation", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+            body: JSON.stringify({
+              id, mode: "direct-battle", modelAId: modelId,
+              userMessageId: userMsgId, modelAMessageId: modelMsgId,
+              userMessage: { content: prompt, experimental_attachments: [], metadata: {} },
+              modality: "chat", recaptchaV3Token: recaptchaToken,
+            }),
+          });
+          const text = await response.text();
+          return { status: response.status, text };
+        }, {
+          prompt, modelId,
+          id: id || require("crypto").randomUUID(),
+          userMsgId: userMessageId || require("crypto").randomUUID(),
+          modelMsgId: modelMessageId || require("crypto").randomUUID(),
+          recaptchaToken,
+        });
+
+        const classified = classifyArenaError(result.status, result.text);
+        const is429 = classified.rateLimit;
+        const is401 = classified.authExpired;
+        log(`arena/chat attempt=${attempt}/${maxAttempts} account=${account.label} status=${result.status} bytes=${result.text.length}`);
+
+        lastResult = { result, is429, is401, classified };
+        lastAccount = account;
+
+        if (!is429 && !is401) {
+          return json(res, 200, {
+            ok: result.status === 200,
+            status: result.status,
+            text: result.text,
+            accountId: account.id,
+            accountLabel: account.label,
+            is429,
+          });
+        }
+
+        if (classified.tooManyRequests && !classified.promptFailed) {
+          globalRateLimitedUntil = Date.now() + 60000;
+          log(`arena/chat global cooldown after Too Many Requests until ${new Date(globalRateLimitedUntil).toLocaleTimeString()}`);
+          break;
+        }
+
+        const state = accounts.get(account.id);
+        if (state) state.rateLimitedUntil = Date.now() + (is401 ? 0 : 60000);
+        if (is401) await closeAccountRuntime(account.id);
+        saveAccountsToDisk();
+        log(`arena/chat switching after ${result.status} on ${account.label}`);
+      }
+
+      return json(res, 200, {
+        ok: false,
+        status: lastResult?.result?.status || 503,
+        text: lastResult?.result?.text || "No available accounts",
+        accountId: lastAccount?.id || null,
+        accountLabel: lastAccount?.label || null,
+        is429: !!lastResult?.is429,
+      });
+    }
+
     return json(res, 404, agentError("not_found", `Unknown path: ${pathname}`));
   } catch (err) {
     log(`erro: ${err.message}`);
@@ -432,6 +625,7 @@ server = http.createServer(async (req, res) => {
 });
 
 process.on("SIGINT", async () => {
+  for (const id of [...accountRuntimes.keys()]) await closeAccountRuntime(id);
   await browser?.close().catch(() => {});
   process.exit(0);
 });

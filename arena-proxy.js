@@ -1,5 +1,4 @@
 import http from "node:http";
-import https from "node:https";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,7 +22,7 @@ if (fs.existsSync(envPath)) {
 
 const PORT = Number(process.env.PORT || 9228);
 const PROXY_API_KEY = process.env.PROXY_API_KEY || "";
-const ARENA_COOKIE = process.env.ARENA_COOKIE || "";
+
 const DEFAULT_MODEL_ID = process.env.ARENA_DEFAULT_MODEL_ID || "019b24bb-5caf-71c3-b854-37d0c7086f21";
 const ARENA_MODALITY = process.env.ARENA_MODALITY || "chat";
 const ARENA_SESSION_URL = (process.env.ARENA_SESSION_URL || "http://127.0.0.1:9230").replace(/\/+$/, "");
@@ -56,8 +55,11 @@ Use exactly this form, with valid JSON inside:
 Never put tool calls in Markdown code fences.
 Never explain a tool call before or after emitting it.
 The arguments object must match the selected tool schema exactly.
+Never include fields that are not listed in the tool schema inside arguments.
+Descriptions, comments, labels, reasons, or explanations are NOT tool arguments unless the schema explicitly lists them.
 For bash, command and timeout are separate fields, for example:
 <tool_call>{"name":"bash","arguments":{"command":"pwd","timeout":10}}</tool_call>
+For bash, do NOT put description inside arguments. If a description exists, it is metadata outside the model tool-call payload and must be omitted.
 Do not produce malformed JSON.
 Use Portuguese when the user writes Portuguese, unless the task requires code or exact command output.`;
 
@@ -109,60 +111,7 @@ function uuidv7() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-async function sessionJson(path, timeoutMs = 30000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${ARENA_SESSION_URL}${path}`, { signal: controller.signal });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); }
-    catch { throw new Error(`Arena session non-JSON ${res.status}: ${text.slice(0, 200)}`); }
-    if (!res.ok || data?.ok === false) {
-      const actions = Array.isArray(data?.nextActions) ? ` Next actions: ${data.nextActions.join(" | ")}` : "";
-      throw new Error(`${data?.code || "arena_session_error"}: ${data?.error || `HTTP ${res.status}`}.${actions}`);
-    }
-    return data;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-async function getRecaptchaToken() {
-  logRequest("recaptcha:playwright:start", { session: ARENA_SESSION_URL });
-  const data = await sessionJson("/recaptcha", 45000);
-  logRequest("recaptcha:playwright:ok", { tokenLength: data?.token?.length || 0 });
-  if (!data?.token) throw new Error("Playwright session did not return a reCAPTCHA token");
-  return data.token;
-}
-
-async function getNextAccount() {
-  logRequest("accounts:next:start", { session: ARENA_SESSION_URL });
-  const data = await sessionJson("/accounts/next", 15000);
-  if (data?.cookieHeader) {
-    logRequest("accounts:next:ok", { id: data.id, label: data.label, cookieLength: data.cookieHeader.length });
-    return { id: data.id, label: data.label, cookieHeader: data.cookieHeader };
-  }
-  if (ARENA_COOKIE) {
-    logRequest("cookies:env:fallback", { length: ARENA_COOKIE.length });
-    return { id: "env", label: "env", cookieHeader: ARENA_COOKIE };
-  }
-  throw new Error("No available Arena account");
-}
-
-async function markRateLimited(idOrEmail) {
-  if (!idOrEmail || idOrEmail === "env") return;
-  try {
-    await fetch(`${ARENA_SESSION_URL}/accounts/rate-limit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: idOrEmail, cooldownMs: 60000 }),
-      signal: AbortSignal.timeout(5000),
-    });
-  } catch {}
-}
 
 function lastUserText(messages) {
   const last = [...(messages || [])].reverse().find((m) => m.role === "user");
@@ -205,22 +154,39 @@ function describeTool(tool) {
     const desc = schema?.description ? ` - ${String(schema.description).slice(0, 80)}` : "";
     return `${name}: ${type} (${req})${desc}`;
   }).join(", ");
-  const desc = fn.description ? `: ${String(fn.description).slice(0, 160)}` : "";
-  return `- ${fn.name}${desc}\n  arguments: { ${args} }`;
+  const desc = fn.description ? `\n  description: ${String(fn.description).slice(0, 160)}` : "";
+  return `- ${fn.name}${desc}\n  allowed argument keys only: { ${args} }`;
 }
 
 function toolCallRequired(params) {
   const messages = Array.isArray(params?.messages) ? params.messages : [];
+  const choice = params?.tool_choice;
+  if (choice === "none") return false;
+  if (choice === "required") return true;
+  if (choice && typeof choice === "object" && choice.function?.name) return true;
   return Array.isArray(params?.tools)
     && params.tools.length > 0
     && explicitlyRequestsTool(lastUserText(messages))
     && !hasToolResult(messages);
 }
 
+function toolsEnabled(params) {
+  return Array.isArray(params?.tools) && params.tools.length > 0 && params.tool_choice !== "none";
+}
+
 function buildPrompt(params) {
   const messages = Array.isArray(params.messages) ? params.messages : [];
-  const tools = Array.isArray(params.tools) ? params.tools : [];
+  const tools = toolsEnabled(params) ? params.tools : [];
+  const choice = params?.tool_choice;
   const parts = [];
+
+  if (Array.isArray(params.tools) && params.tools.length > 0 && choice === "none") {
+    parts.push([
+      "Tool use disabled:",
+      "The client supplied tools, but tool_choice is none.",
+      "Do not output <tool_call> tags. Answer normally in text.",
+    ].join("\n"));
+  }
 
   if (tools.length > 0) {
     parts.push([
@@ -228,8 +194,27 @@ function buildPrompt(params) {
       "If the user asks to use a tool, answer with exactly one tool call and no other text.",
       "Format:",
       '<tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
+      "The arguments object may contain ONLY keys listed in that tool's allowed argument keys.",
+      "Never put metadata fields such as description, title, rationale, comment, or explanation inside arguments unless explicitly listed.",
       "Available tools:",
       tools.map(describeTool).join("\n"),
+    ].join("\n"));
+  }
+
+  if (tools.length > 0 && choice === "required") {
+    parts.push([
+      "Tool call required:",
+      "tool_choice is required. Your next response MUST be only one valid <tool_call>{...}</tool_call> wrapper.",
+      "Do not answer in normal text. Do not include Markdown.",
+    ].join("\n"));
+  }
+
+  if (tools.length > 0 && choice && typeof choice === "object" && choice.function?.name) {
+    parts.push([
+      "Specific tool required:",
+      `You MUST call the tool named ${choice.function.name}.`,
+      "Your next response MUST be only one valid <tool_call>{...}</tool_call> wrapper.",
+      "Do not answer in normal text. Do not include Markdown.",
     ].join("\n"));
   }
 
@@ -238,6 +223,7 @@ function buildPrompt(params) {
       "The latest user explicitly requested a tool.",
       "Your next response MUST be only one valid <tool_call>{...}</tool_call> wrapper.",
       "Do not explain. Do not include Markdown.",
+      "Use only allowed argument keys. Do not add description/comment/rationale fields.",
       "Available tools:",
       tools.map(describeTool).join("\n"),
     ].join("\n"));
@@ -245,6 +231,11 @@ function buildPrompt(params) {
 
   for (const message of messages) {
     const role = message?.role || "user";
+    if (role === "developer") {
+      const content = messageContent(message?.content);
+      if (content) parts.push(`developer instructions:\n${content}`);
+      continue;
+    }
     if (role === "assistant" && Array.isArray(message.tool_calls)) {
       parts.push(`assistant tool calls:\n${JSON.stringify(message.tool_calls, null, 2)}`);
       continue;
@@ -269,7 +260,25 @@ function buildPrompt(params) {
   return parts.join("\n\n").trim() || lastUserText(messages);
 }
 
-function parseToolCalls(text) {
+function allowedToolArgs(name, args, tools = []) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  const tool = tools.find((item) => {
+    const fn = item?.function || item || {};
+    return fn.name === name;
+  });
+  const params = (tool?.function || tool || {})?.parameters || {};
+  const props = params.properties || {};
+  const allowExtra = params.additionalProperties === true;
+  const allowed = new Set(Object.keys(props));
+  if (allowExtra || allowed.size === 0) return args;
+  const filtered = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (allowed.has(key)) filtered[key] = value;
+  }
+  return filtered;
+}
+
+function parseToolCalls(text, tools = []) {
   const calls = [];
   let remaining = text || "";
   const parts = [];
@@ -296,7 +305,8 @@ function parseToolCalls(text) {
         try { args = JSON.parse(args); }
         catch {}
       }
-      return { name: fn.name || item?.name || "", arguments: args };
+      const name = fn.name || item?.name || "";
+      return { name, arguments: allowedToolArgs(name, args, tools) };
     }).filter((item) => item.name);
   };
   const pushParsed = (parsed) => {
@@ -377,157 +387,38 @@ function usageFromText(prompt, completion, finish = null) {
   };
 }
 
-function makeArenaPayload(prompt, modelId) {
-  return {
-    id: uuidv7(),
-    mode: "direct-battle",
-    modelAId: modelId || DEFAULT_MODEL_ID,
-    userMessageId: uuidv7(),
-    modelAMessageId: uuidv7(),
-    userMessage: {
-      content: prompt,
-      experimental_attachments: [],
-      metadata: {},
-    },
-    modality: ARENA_MODALITY,
-    recaptchaV3Token: null,
-  };
-}
-
-async function arenaDirectCall(prompt, modelId, cookie, recaptchaToken) {
-  const started = Date.now();
-  const payload = makeArenaPayload(prompt, modelId);
-  payload.recaptchaV3Token = recaptchaToken;
-
-  const body = JSON.stringify(payload);
-  const url = new URL("https://arena.ai/nextjs-api/stream/create-evaluation");
-
-  return new Promise((resolve, reject) => {
-    const opts = {
+async function arenaChat(prompt, modelId) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180000);
+  try {
+    const res = await fetch(`${ARENA_SESSION_URL}/arena/chat`, {
       method: "POST",
-      hostname: url.hostname,
-      path: url.pathname,
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-        "Cookie": cookie,
-        "Accept": "text/event-stream",
-        "Origin": "https://arena.ai",
-        "Referer": "https://arena.ai/code/direct",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148 Safari/537.36",
-      },
-      timeout: 120000,
-    };
-
-    const req = https.request(opts, (res) => {
-      const contentType = res.headers["content-type"] || "";
-      if (contentType.includes("event-stream")) {
-        let buffer = "";
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          try { res.destroy(); } catch {}
-          logRequest("arena:direct:done", { status: res.statusCode, ms: Date.now() - started, bytes: buffer.length, modelId, modality: ARENA_MODALITY });
-          resolve({ status: res.statusCode, headers: res.headers, text: buffer });
-        };
-        const timer = setTimeout(() => finish(), 120000);
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => {
-          buffer += chunk;
-          if (buffer.includes('"finishReason"')) finish();
-        });
-        res.on("end", () => finish());
-        res.on("error", (e) => { if (!settled) reject(e); });
-      } else {
-        let data = "";
-        const timer = setTimeout(() => reject(new Error("Timeout")), 120000);
-        res.setEncoding("utf8");
-        res.on("data", (c) => data += c);
-        res.on("end", () => {
-          clearTimeout(timer);
-          logRequest("arena:direct:done", { status: res.statusCode, ms: Date.now() - started, bytes: data.length, modelId, modality: ARENA_MODALITY });
-          resolve({ status: res.statusCode, headers: res.headers, text: data });
-        });
-      }
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt,
+        modelId,
+        id: uuidv7(),
+        userMessageId: uuidv7(),
+        modelMessageId: uuidv7(),
+      }),
+      signal: controller.signal,
     });
-    req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-    req.write(body);
-    req.end();
-  });
-}
-
-async function arenaStreamCall(prompt, modelId, cookie, recaptchaToken, onText, onFinish, onError) {
-  const started = Date.now();
-  const payload = makeArenaPayload(prompt, modelId);
-  payload.recaptchaV3Token = recaptchaToken;
-
-  const body = JSON.stringify(payload);
-  const url = new URL("https://arena.ai/nextjs-api/stream/create-evaluation");
-
-  const opts = {
-    method: "POST",
-    hostname: url.hostname,
-    path: url.pathname,
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(body),
-      "Cookie": cookie,
-      "Accept": "text/event-stream",
-      "Origin": "https://arena.ai",
-      "Referer": "https://arena.ai/code/direct",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    },
-    timeout: 120000,
-  };
-
-  const req = https.request(opts, (res) => {
-    if (res.statusCode !== 200) {
-      let data = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => data += c);
-      res.on("end", () => {
-        logRequest("arena:stream:error", { status: res.statusCode, ms: Date.now() - started, bytes: data.length, modelId, modality: ARENA_MODALITY, body: data.slice(0, 200) });
-        onError(new Error(`Arena ${res.statusCode}: ${data.slice(0, 500)}`));
-      });
-      return;
+    const data = await res.json();
+    if (!data.ok) {
+      const status = data.status || 500;
+      const err = new Error(`Arena ${status}: ${(data.text || data.error || "").slice(0, 500)}`);
+      if (status === 429 || status === 401) {
+        err.retryable = true;
+        err.is429 = status === 429;
+        err.accountId = data.accountId;
+      }
+      throw err;
     }
-    res.setEncoding("utf8");
-    let raw = "";
-    let pending = "";
-    res.on("data", (chunk) => {
-      raw += chunk;
-      pending += chunk;
-      const lines = pending.split(/\r?\n/);
-      pending = lines.pop() || "";
-      for (const line of lines) {
-        if (line.startsWith("a0:")) {
-          try {
-            const val = JSON.parse(line.slice(3));
-            if (typeof val === "string") onText(val);
-          } catch {}
-        }
-      }
-    });
-    res.on("end", () => {
-      if (pending.startsWith("a0:")) {
-        try {
-          const val = JSON.parse(pending.slice(3));
-          if (typeof val === "string") onText(val);
-        } catch {}
-      }
-      const parsed = parseArenaSse(raw + pending);
-      logRequest("arena:stream:done", { status: res.statusCode, ms: Date.now() - started, bytes: raw.length + pending.length, modelId, modality: ARENA_MODALITY, finishReason: parsed.finish?.finishReason });
-      onFinish(parsed.finish);
-    });
-    res.on("error", (e) => onError(e));
-  });
-  req.on("error", onError);
-  req.on("timeout", () => { req.destroy(); onError(new Error("timeout")); });
-  req.write(body);
-  req.end();
+    logRequest("arena:chat:ok", { account: data.accountLabel, status: data.status, bytes: (data.text || "").length, modelId });
+    return { status: data.status, text: data.text, accountId: data.accountId };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function streamJson(res, data) {
@@ -685,12 +576,19 @@ http.createServer((req, res) => {
             promptChars: prompt.length,
           });
 
-          const recaptchaToken = await getRecaptchaToken();
+          const result = await arenaChat(prompt, modelId);
+
+          const parsed = parseArenaSse(result.text);
+          const fullText = parsed.text || "";
+          const allowToolCalls = toolsEnabled(params);
+          const toolParsed = allowToolCalls
+            ? parseToolCalls(fullText, params.tools || [])
+            : { textContent: fullText, toolCalls: [] };
+          const usage = usageFromText(prompt, fullText, parsed.finish);
+          const hasTools = allowToolCalls;
+          const afterToolResult = hasToolResult(params.messages);
 
           if (stream) {
-            const collected = [];
-            const hasTools = Array.isArray(params.tools) && params.tools.length > 0;
-            const afterToolResult = hasToolResult(params.messages);
             const streamState = {
               id: `chatcmpl-${Date.now()}`,
               created: Math.floor(Date.now() / 1000),
@@ -703,121 +601,34 @@ http.createServer((req, res) => {
               "Connection": "keep-alive",
               "Access-Control-Allow-Origin": "*",
             });
-
             res.write(": heartbeat\n\n");
 
-            streamJson(res, {
-              id: streamState.id,
-              object: "chat.completion.chunk",
-              created: streamState.created,
-              model: streamState.model,
-              choices: [streamChoice({ role: "assistant", content: "" })],
-            });
-
-            await new Promise((resolvePromise, rejectPromise) => {
-              let currentId = null;
-              let currentCookie = null;
-              let currentRecaptchaToken = recaptchaToken;
-              const doCall = async (retriesLeft) => {
-                if (!currentCookie) {
-                  let account;
-                  try { account = await getNextAccount(); }
-                  catch (err) { rejectPromise(err); return; }
-                  if (!account?.cookieHeader) { rejectPromise(new Error("No Arena cookie available")); return; }
-                  if (currentId && account.id !== currentId) {
-                    await markRateLimited(currentId).catch(() => {});
-                  }
-                  currentId = account.id;
-                  currentCookie = account.cookieHeader;
-                }
-                const collectedLocal = [];
-                arenaStreamCall(
-                  prompt,
-                  modelId,
-                  currentCookie,
-                  currentRecaptchaToken,
-                  (text) => {
-                    collectedLocal.push(text);
-                    if (!hasTools || afterToolResult) {
-                      streamJson(res, {
-                        id: streamState.id,
-                        object: "chat.completion.chunk",
-                        created: streamState.created,
-                        model: streamState.model,
-                        choices: [streamChoice({ content: text })],
-                      });
-                    }
-                  },
-                  (finish) => {
-                    collected.push(...collectedLocal);
-                    const fullText = collected.join("");
-                    const usage = usageFromText(prompt, fullText, finish);
-                    if (hasTools && !afterToolResult) {
-                      const parsed = parseToolCalls(fullText);
-                      logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: parsed.toolCalls.length > 0 ? "tool_calls" : "stop", contentChars: parsed.textContent.length, toolCalls: parsed.toolCalls.length, usage });
-                      streamOpenAICompletion(res, streamState, fullText, parsed, false);
-                    } else {
-                      logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: finish?.finishReason || "stop", contentChars: fullText.length, toolCalls: 0, usage });
-                      streamJson(res, {
-                        id: streamState.id,
-                        object: "chat.completion.chunk",
-                        created: streamState.created,
-                        model: streamState.model,
-                        choices: [streamChoice({}, finish?.finishReason || "stop")],
-                        usage,
-                      });
-                      res.write("data: [DONE]\n\n");
-                      res.end();
-                    }
-                    resolvePromise();
-                  },
-                  async (err) => {
-                    const is429 = /429|Too Many Requests|rate.?limit/i.test(err.message);
-                    if (is429 && retriesLeft > 0) {
-                      const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retriesLeft));
-                      logRequest("arena:retry", { account: currentId, retriesLeft, delay, err: err.message.slice(0, 100) });
-                      try { currentRecaptchaToken = await getRecaptchaToken(); } catch {}
-                      setTimeout(() => doCall(retriesLeft - 1), delay);
-                    } else {
-                      if (is429) markRateLimited(currentId).catch(() => {});
-                      if (!res.headersSent) {
-                        apiError(res, 500, err.message);
-                      } else {
-                        streamJson(res, { error: { message: err.message } });
-                        res.write("data: [DONE]\n\n");
-                        res.end();
-                      }
-                      rejectPromise(err);
-                    }
-                  }
-                );
-              };
-              doCall(3);
-            });
-          } else {
-            let result = null;
-            let account;
-            try { account = await getNextAccount(); }
-            catch (err) { throw err; }
-            if (!account?.cookieHeader) throw new Error("No Arena cookie available");
-            const attemptAccountId = account.id;
-            for (let retries = 3; retries > 0; retries--) {
-              result = await arenaDirectCall(prompt, modelId, account.cookieHeader, retries < 3 ? await getRecaptchaToken() : recaptchaToken);
-              if (result.status === 200) break;
-              const is429 = result.status === 429 || /Too Many Requests|rate.?limit/i.test(result.text);
-              if (!is429 || retries <= 1) {
-                logRequest("request:error", { model: params.model || "arena-default", account: attemptAccountId, status: result.status, body: result.text.slice(0, 300) });
-                throw new Error(`Arena ${result.status}: ${result.text.slice(0, 500)}`);
+            if (hasTools && !afterToolResult && toolParsed.toolCalls.length > 0) {
+              streamOpenAICompletion(res, streamState, fullText, toolParsed, true);
+            } else {
+              streamJson(res, {
+                id: streamState.id, object: "chat.completion.chunk",
+                created: streamState.created, model: streamState.model,
+                choices: [streamChoice({ role: "assistant", content: "" })],
+              });
+              if (fullText) {
+                streamJson(res, {
+                  id: streamState.id, object: "chat.completion.chunk",
+                  created: streamState.created, model: streamState.model,
+                  choices: [streamChoice({ content: fullText })],
+                });
               }
-              const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retries));
-              logRequest("arena:retry", { account: attemptAccountId, retriesLeft: retries - 1, delay });
-              await new Promise((r) => setTimeout(r, delay));
+              streamJson(res, {
+                id: streamState.id, object: "chat.completion.chunk",
+                created: streamState.created, model: streamState.model,
+                choices: [streamChoice({}, toolParsed.toolCalls.length > 0 ? "tool_calls" : "stop")],
+                usage,
+              });
+              res.write("data: [DONE]\n\n");
+              res.end();
             }
-            if (result.status === 429) markRateLimited(attemptAccountId).catch(() => {});
-            const parsed = parseArenaSse(result.text);
-            const toolParsed = parseToolCalls(parsed.text);
-            const usage = usageFromText(prompt, parsed.text, parsed.finish);
-
+            logRequest("request:stream:ok", { model: params.model || "arena-default", finishReason: toolParsed.toolCalls.length > 0 ? "tool_calls" : "stop", contentChars: toolParsed.textContent.length, toolCalls: toolParsed.toolCalls.length, usage });
+          } else {
             json(res, 200, {
               id: `chatcmpl-${Date.now()}`,
               object: "chat.completion",
@@ -836,7 +647,8 @@ http.createServer((req, res) => {
           }
         } catch (err) {
           log("ERROR:", err.message);
-          if (!res.headersSent) apiError(res, 500, err.message);
+          const status = err.is429 ? 429 : 500;
+          if (!res.headersSent) apiError(res, status, err.message);
           else {
             streamJson(res, { error: { message: err.message } });
             res.write("data: [DONE]\n\n");
@@ -867,6 +679,4 @@ http.createServer((req, res) => {
   log(`Modality: ${ARENA_MODALITY}`);
   log(`Arena session: ${ARENA_SESSION_URL}`);
   if (PROXY_API_KEY) log("API key auth enabled");
-  if (ARENA_COOKIE) log(`Cookie loaded from env (${ARENA_COOKIE.length} chars)`);
-  else log("No cookie in env, will fetch from Playwright session");
 });
