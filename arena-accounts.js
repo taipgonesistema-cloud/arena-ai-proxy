@@ -111,35 +111,46 @@ function App() {
   const [pendingId, setPendingId] = useState(null);
   const [busyText, setBusyText] = useState("");
 
+  function killByPorts(ports) {
+    for (const port of ports) {
+      try {
+        const out = execSync(`netstat -ano | findstr ":${port} " | findstr LISTENING`, {encoding: "utf8", timeout: 5000, windowsHide: true});
+        for (const line of out.trim().split("\n").filter(Boolean)) {
+          const parts = line.trim().split(/\s+/);
+          const spid = parts[parts.length - 1];
+          if (spid && spid !== "0" && spid !== String(process.pid)) {
+            try { execSync(`taskkill /F /PID ${spid} 2>NUL`, {windowsHide: true}); } catch {}
+          }
+        }
+      } catch {}
+    }
+  }
   const vibeStart = useCallback(() => {
     _vibeRequested = true;
     setMode("busy");
-    setBusyText("Vibe-Start: matando processos...");
+    setBusyText("Vibe-Start: matando processos nas portas 9228/9230/9050...");
+    killByPorts([9228, 9230, 9050, 9051]);
     setTimeout(() => {
-      try { execSync(`taskkill /F /FI "PID ne ${process.pid}" /IM node.exe 2>NUL`, {stdio: "pipe"}); } catch {}
       setBusyText("Vibe-Start: iniciando stack...");
+      try { execSync(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`, {cwd: __dirname, windowsHide: true}); } catch {}
       setTimeout(() => {
-        try { execSync(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`, {cwd: __dirname, windowsHide: true}); } catch {}
         setBusyText("Vibe-Start: configurando Pi.dev...");
-        setTimeout(() => {
-          try {
-            const piDir = path.dirname(PI_MODELS_PATH);
-            if (!fs.existsSync(piDir)) fs.mkdirSync(piDir, {recursive: true});
-            const arenaCfg = {
-              baseUrl: "http://localhost:9228/v1", api: "openai-completions", apiKey: "dummy",
-              compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
-              models: [{id: "arena-default", name: "Arena AI Default Chat", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 8192, cost: {input: 0, output: 0}}],
-            };
-            let existing = {};
-            try { existing = JSON.parse(fs.readFileSync(PI_MODELS_PATH, "utf8")); } catch {}
-            const providers = existing.providers || {};
-            providers["arena-ai"] = arenaCfg;
-            fs.writeFileSync(PI_MODELS_PATH, JSON.stringify({...existing, providers}, null, 2), "utf8");
-          } catch {}
-          setBusyText("Vibe-Start: iniciando Pi.dev...");
-          setTimeout(() => { exit(); }, 1000);
-        }, 2000);
-      }, 1000);
+        try {
+          const piDir = path.dirname(PI_MODELS_PATH);
+          if (!fs.existsSync(piDir)) fs.mkdirSync(piDir, {recursive: true});
+          let existing = {};
+          try { existing = JSON.parse(fs.readFileSync(PI_MODELS_PATH, "utf8")); } catch {}
+          const providers = existing.providers || {};
+          providers["arena-ai"] = {
+            baseUrl: "http://localhost:9228/v1", api: "openai-completions", apiKey: "dummy",
+            compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
+            models: [{id: "arena-default", name: "Arena AI Default Chat", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 8192, cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}}],
+          };
+          fs.writeFileSync(PI_MODELS_PATH, JSON.stringify({...existing, providers}, null, 2), "utf8");
+        } catch {}
+        setBusyText("Vibe-Start: iniciando Pi.dev...");
+        setTimeout(() => { exit(); }, 1000);
+      }, 2000);
     }, 500);
   }, [exit]);
 
@@ -407,15 +418,27 @@ if (args.includes("--status")) {
 
 if (args.includes("--vibe")) {
   _vibeRequested = true;
-  const pid = process.pid;
-  console.log("Vibe-Start direto... (PID: " + pid + ")");
+  console.log("Vibe-Start direto...");
 
+  function safeStderr(msg) { try { process.stderr.write(msg); } catch {} }
   function logAndRun(cmd) {
     try { execSync(cmd, {stdio: "pipe", timeout: 10000, windowsHide: true}); }
-    catch (e) { process.stderr.write("  aviso: " + e.message.replace(/\r?\n.*/s, "") + "\n"); }
+    catch (e) { safeStderr("  aviso: " + e.message.replace(/\r?\n.*/s, "") + "\n"); }
   }
 
-  logAndRun(`taskkill /F /FI "PID ne ${pid}" /IM node.exe 2>NUL`);
+  // Mata processos nas portas da stack, nao todos os node.exe (nao mata o npm que executa este script)
+  for (const port of [9228, 9230, 9050, 9051]) {
+    try {
+      const out = execSync(`netstat -ano | findstr ":${port} " | findstr LISTENING`, {encoding: "utf8", timeout: 5000, windowsHide: true});
+      for (const line of out.trim().split("\n").filter(Boolean)) {
+        const parts = line.trim().split(/\s+/);
+        const spid = parts[parts.length - 1];
+        if (spid && spid !== "0" && spid !== String(process.pid)) {
+          try { execSync(`taskkill /F /PID ${spid} 2>NUL`, {windowsHide: true}); } catch {}
+        }
+      }
+    } catch {}
+  }
   logAndRun(`start "arena-stack" cmd /c "npm start > arena-stack.log 2>&1"`);
 
   try {
@@ -450,7 +473,7 @@ if (args.includes("--vibe")) {
         pi.on("exit", (code) => process.exit(code || 0));
         return;
       } catch {
-        process.stderr.write(".");
+        safeStderr(".");
         await new Promise(r => setTimeout(r, 2000));
       }
     }
