@@ -11,7 +11,7 @@ if (hasAccounts) {
 }
 
 if (accounts.length > 0) {
-  const p = spawn("node", [path.join(__dirname, "arena-accounts.cjs")], {
+  const p = spawn("node", [path.join(__dirname, "arena-accounts.js")], {
     stdio: "inherit",
     cwd: __dirname,
   });

@@ -6,16 +6,16 @@
   "scripts": {
     "start": "node start.cjs",
     "login": "node login.cjs",
-    "accounts": "node arena-accounts.cjs",
-    "accounts:add": "node arena-accounts.cjs --add --email",
-    "accounts:remove": "node arena-accounts.cjs --remove --email",
-    "accounts:status": "node arena-accounts.cjs --status",
+    "accounts": "node arena-accounts.js",
+    "accounts:status": "node arena-accounts.js --status",
     "dev": "node start.cjs",
     "proxy": "node arena-proxy.js",
     "session": "node arena-session.cjs",
-    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.cjs && node --check login.cjs"
+    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js && node --check login.cjs"
   },
   "dependencies": {
-    "playwright": "^1.57.0"
+    "ink": "^7.0.5",
+    "playwright": "^1.57.0",
+    "react": "^19.2.7"
   }
 }
