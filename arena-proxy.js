@@ -123,14 +123,6 @@ function lastUserText(messages) {
   return String(last.content || "");
 }
 
-function hasToolResult(messages) {
-  return (messages || []).some((m) => m?.role === "tool" || m?.role === "toolResult");
-}
-
-function explicitlyRequestsTool(text) {
-  return /\b(tool|ferramenta|bash|command|comando|run|rodar|execute|executar|pwd|read|ler|list|listar|grep|find|edit|editar|write|escrever)\b/i.test(String(text || ""));
-}
-
 function messageContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -158,18 +150,6 @@ function describeTool(tool) {
   return `- ${fn.name}${desc}\n  allowed argument keys only: { ${args} }`;
 }
 
-function toolCallRequired(params) {
-  const messages = Array.isArray(params?.messages) ? params.messages : [];
-  const choice = params?.tool_choice;
-  if (choice === "none") return false;
-  if (choice === "required") return true;
-  if (choice && typeof choice === "object" && choice.function?.name) return true;
-  return Array.isArray(params?.tools)
-    && params.tools.length > 0
-    && explicitlyRequestsTool(lastUserText(messages))
-    && !hasToolResult(messages);
-}
-
 function toolsEnabled(params) {
   return Array.isArray(params?.tools) && params.tools.length > 0 && params.tool_choice !== "none";
 }
@@ -189,44 +169,22 @@ function buildPrompt(params) {
   }
 
   if (tools.length > 0) {
-    parts.push([
-      "Tool calling mode:",
-      "If the user asks to use a tool, answer with exactly one tool call and no other text.",
+    const contractLines = [
+      "Tool calling mode — you have access to tools that can execute commands, read files, search code, and more.",
+      "When a tool call is needed, your ENTIRE response must be ONLY the tool call and nothing else.",
+      "Do not answer tool results yourself. A tool result only exists after the tool executes.",
       "Format:",
-      '<tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
-      "The arguments object may contain ONLY keys listed in that tool's allowed argument keys.",
-      "Never put metadata fields such as description, title, rationale, comment, or explanation inside arguments unless explicitly listed.",
-      "Available tools:",
-      tools.map(describeTool).join("\n"),
-    ].join("\n"));
-  }
-
-  if (tools.length > 0 && choice === "required") {
-    parts.push([
-      "Tool call required:",
-      "tool_choice is required. Your next response MUST be only one valid <tool_call>{...}</tool_call> wrapper.",
-      "Do not answer in normal text. Do not include Markdown.",
-    ].join("\n"));
-  }
-
-  if (tools.length > 0 && choice && typeof choice === "object" && choice.function?.name) {
-    parts.push([
-      "Specific tool required:",
-      `You MUST call the tool named ${choice.function.name}.`,
-      "Your next response MUST be only one valid <tool_call>{...}</tool_call> wrapper.",
-      "Do not answer in normal text. Do not include Markdown.",
-    ].join("\n"));
-  }
-
-  if (tools.length > 0 && toolCallRequired(params)) {
-    parts.push([
-      "The latest user explicitly requested a tool.",
-      "Your next response MUST be only one valid <tool_call>{...}</tool_call> wrapper.",
-      "Do not explain. Do not include Markdown.",
-      "Use only allowed argument keys. Do not add description/comment/rationale fields.",
-      "Available tools:",
-      tools.map(describeTool).join("\n"),
-    ].join("\n"));
+      '<tool_call>{"name":"tool_name","arguments":{"arg":"value"}}</tool_call>',
+      "Never put metadata fields such as description, title, rationale, or explanation inside arguments.",
+      "The arguments object must match the selected tool schema exactly.",
+    ];
+    if (choice === "required") {
+      contractLines.push("", "tool_choice is required. You MUST call a tool. Do not answer in normal text.");
+    } else if (choice && typeof choice === "object" && choice.function?.name) {
+      contractLines.push("", `You MUST call the tool named "${choice.function.name}". Do not answer in normal text.`);
+    }
+    contractLines.push("", "Available tools:", ...tools.map(describeTool));
+    parts.push(contractLines.join("\n"));
   }
 
   for (const message of messages) {
@@ -617,7 +575,6 @@ http.createServer((req, res) => {
             : { textContent: fullText, toolCalls: [] };
           const usage = usageFromText(prompt, fullText, parsed.finish);
           const hasTools = allowToolCalls;
-          const afterToolResult = hasToolResult(params.messages);
 
           if (stream) {
             const streamState = {
@@ -634,7 +591,7 @@ http.createServer((req, res) => {
             });
             res.write(": heartbeat\n\n");
 
-            if (hasTools && !afterToolResult && toolParsed.toolCalls.length > 0) {
+            if (hasTools && toolParsed.toolCalls.length > 0) {
               streamOpenAICompletion(res, streamState, fullText, toolParsed, true, usage);
             } else {
               streamJson(res, {
