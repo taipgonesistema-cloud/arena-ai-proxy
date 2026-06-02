@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node setup-tor.cjs",
     "start": "node start.cjs",
     "login": "node arena-accounts.js",
     "accounts:status": "node arena-accounts.js --status",
@@ -13,6 +14,7 @@
     "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "ink": "^7.0.5",
     "playwright": "^1.57.0",
     "react": "^19.2.7"
