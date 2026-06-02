@@ -8,6 +8,11 @@ const BROWSER_CHANNEL = process.env.ARENA_BROWSER_CHANNEL || "chrome";
 const ENV_PATH = path.join(__dirname, ".env");
 const ACCOUNTS_PATH = path.join(__dirname, "accounts.json");
 const SITE_KEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0";
+const FREE_PROXY_SOURCES = [
+  { url: "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt", protocol: "socks5" },
+  { url: "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt", protocol: "http" },
+  { url: "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", protocol: "http" },
+];
 
 let browser = null;
 let defaultContext = null;
@@ -18,6 +23,102 @@ let server = null;
 let currentAccountId = null;
 const accountRuntimes = new Map();
 let globalRateLimitedUntil = 0;
+
+// ─── Proxy Pool ──────────────────────────────────────────────────────
+const proxyPool = [];
+let proxyPoolIndex = 0;
+const badProxyServers = new Set();
+
+function parseProxyEntry(entry, defaultProtocol = "http") {
+  try {
+    const s = entry.trim();
+    if (!s) return null;
+    if (!s.includes("://")) {
+      const [host, port] = s.split(":");
+      if (host && port) return { server: `${defaultProtocol}://${host}:${port}`, protocol: defaultProtocol };
+      return null;
+    }
+    const url = new URL(s);
+    const proto = url.protocol.replace(":", "");
+    const proxy = { server: `${proto}://${url.host}`, protocol: proto };
+    if (url.username) proxy.username = decodeURIComponent(url.username);
+    if (url.password) proxy.password = decodeURIComponent(url.password);
+    return proxy;
+  } catch {
+    return null;
+  }
+}
+
+function initProxyPoolFromEnv() {
+  const envProxy = process.env.PROXY;
+  const envList = process.env.PROXY_LIST;
+  if (envList) {
+    for (const s of envList.split(",")) {
+      const p = parseProxyEntry(s);
+      if (p) proxyPool.push(p);
+    }
+  }
+  if (envProxy) {
+    const p = parseProxyEntry(envProxy);
+    if (p && !proxyPool.some(x => x.server === p.server)) proxyPool.push(p);
+  }
+  if (proxyPool.length > 0) log(`proxy pool: ${proxyPool.length} proxies (configurados via env)`);
+  return proxyPool.length > 0;
+}
+
+function freeProxiesEnabled() {
+  return !process.env.NO_PROXY && !process.env.ARENA_NO_FREE_PROXIES;
+}
+
+function getNextProxy() {
+  if (proxyPool.length === 0) return null;
+  const start = proxyPoolIndex;
+  for (let i = 0; i < proxyPool.length; i++) {
+    const p = proxyPool[proxyPoolIndex % proxyPool.length];
+    proxyPoolIndex++;
+    if (!badProxyServers.has(p.server)) return p;
+  }
+  return null;
+}
+
+function markProxyBad(server) {
+  if (server) {
+    badProxyServers.add(server);
+    log(`proxy marcado como ruim: ${server} (${badProxyServers.size}/${proxyPool.length} proxies ruins)`);
+  }
+}
+
+function proxyPoolStatus() {
+  return {
+    total: proxyPool.length,
+    bad: badProxyServers.size,
+    good: proxyPool.length - badProxyServers.size,
+    currentIndex: proxyPoolIndex,
+  };
+}
+
+async function fetchFreeProxies() {
+  if (proxyPool.length > 0) return;
+  log("buscando proxies gratuitos...");
+  const seen = new Set();
+  for (const source of FREE_PROXY_SOURCES) {
+    try {
+      const res = await fetch(source.url, { signal: AbortSignal.timeout(15000) });
+      if (!res.ok) continue;
+      const text = await res.text();
+      const lines = text.trim().split("\n").filter(Boolean);
+      for (const line of lines) {
+        const p = parseProxyEntry(line.trim(), source.protocol);
+        if (p && !seen.has(p.server)) {
+          seen.add(p.server);
+          proxyPool.push(p);
+        }
+      }
+      if (proxyPool.length >= 50) break;
+    } catch { continue; }
+  }
+  log(`proxy pool: ${proxyPool.length} proxies carregados`);
+}
 
 function classifyArenaError(status, text) {
   const body = String(text || "");
@@ -65,14 +166,24 @@ async function getAccountRuntime(account) {
   if (existing?.page && !existing.page.isClosed()) return existing;
   if (existing) await closeAccountRuntime(account.id);
 
-  const context = await browser.newContext({ viewport: { width: 1280, height: 700 } });
+  const ctxOptions = { viewport: { width: 1280, height: 700 } };
+  const proxy = getNextProxy();
+  if (proxy) ctxOptions.proxy = proxy;
+  const context = await browser.newContext(ctxOptions);
   const cookies = validStoredCookies(account.cookies || []);
   if (cookies.length > 0) await context.addCookies(cookies).catch(() => {});
   const page = await context.newPage();
-  await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-  const runtime = { context, page };
+  try {
+    await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+  } catch (err) {
+    // proxy lento ou morto, marca como ruim
+    if (proxy) markProxyBad(proxy.server);
+    await context.close().catch(() => {});
+    throw new Error(`proxy failed for ${account.label}: ${err.message}`);
+  }
+  const runtime = { context, page, proxy };
   accountRuntimes.set(account.id, runtime);
-  log(`runtime pronto para conta: ${account.label}`);
+  log(`runtime pronto para conta: ${account.label}${proxy ? ' via '+proxy.server : ''}`);
   return runtime;
 }
 
@@ -80,7 +191,7 @@ async function getPageRecaptchaToken(page, label = "page") {
   await page.waitForFunction(
     () => window.grecaptcha && window.grecaptcha.enterprise && window.grecaptcha.enterprise.execute,
     null,
-    { timeout: 30000 }
+    { timeout: 15000 }
   );
   const token = await page.evaluate((siteKey) => {
     return window.grecaptcha.enterprise.execute(siteKey, { action: "chat_submit" });
@@ -296,6 +407,8 @@ async function startBrowser() {
 
   browserStartedAt = Date.now();
   loadAccountsIntoMemory();
+  initProxyPoolFromEnv();
+  if (proxyPool.length === 0 && freeProxiesEnabled()) await fetchFreeProxies();
   await createDefaultContext();
   // apply first available account's cookies so the page loads logged in
   const first = getNextAvailableAccount();
@@ -328,6 +441,7 @@ server = http.createServer(async (req, res) => {
         pageOpen: !!defaultPage && !defaultPage.isClosed(),
         globalRateLimited: globalRateLimitedUntil > Date.now(),
         globalRateLimitedUntil,
+        proxy: proxyPoolStatus(),
         accounts: accountsStatus(),
         accountCount: accounts.size,
       });
@@ -527,7 +641,14 @@ server = http.createServer(async (req, res) => {
 
         account.lastUsedAt = Date.now();
         saveAccountsToDisk();
-        const runtime = await getAccountRuntime(account);
+
+        let runtime;
+        try {
+          runtime = await getAccountRuntime(account);
+        } catch (err) {
+          log(`arena/chat runtime failed for ${account.label}: ${err.message}`);
+          continue; // proxy morto, tenta próxima conta
+        }
         const page = runtime.page;
 
         // Generate a fresh reCAPTCHA token per account attempt from the same
@@ -536,9 +657,10 @@ server = http.createServer(async (req, res) => {
         try {
           recaptchaToken = await getPageRecaptchaToken(page, account.label);
         } catch (e) {
+          if (runtime.proxy) markProxyBad(runtime.proxy.server);
           log(`reCAPTCHA account page warn: ${e.message}`);
           try {
-            await page.goto(START_URL, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {});
+            await page.goto(START_URL, { waitUntil: "networkidle", timeout: 15000 }).catch(() => {});
             recaptchaToken = await getPageRecaptchaToken(page, `${account.label}:reload`);
           } catch (fallbackErr) {
             log(`reCAPTCHA account page reload warn: ${fallbackErr.message}`);
@@ -592,10 +714,20 @@ server = http.createServer(async (req, res) => {
           });
         }
 
+        // Mark proxy as bad and close runtime so next attempt gets a new proxy
+        const currentRuntime = accountRuntimes.get(account.id);
+        if (currentRuntime?.proxy?.server) markProxyBad(currentRuntime.proxy.server);
+        await closeAccountRuntime(account.id);
+
         if (classified.tooManyRequests && !classified.promptFailed) {
-          globalRateLimitedUntil = Date.now() + 60000;
-          log(`arena/chat global cooldown after Too Many Requests until ${new Date(globalRateLimitedUntil).toLocaleTimeString()}`);
-          break;
+          const remainingGood = proxyPool.length - badProxyServers.size;
+          if (remainingGood > 0 && attempt < maxAttempts) {
+            log(`arena/chat proxy rotation: ${account.label} 429, ${remainingGood} proxies bons restantes`);
+          } else {
+            globalRateLimitedUntil = Date.now() + 60000;
+            log(`arena/chat sem mais proxies, global cooldown 60s`);
+            break;
+          }
         }
 
         const state = accounts.get(account.id);

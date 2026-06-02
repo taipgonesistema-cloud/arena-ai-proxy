@@ -23,3 +23,5 @@ Thumbs.db
 *.tmp
 *.bak
 docs/
+tor/
+*.mjs
