@@ -650,28 +650,29 @@ http.createServer((req, res) => {
 
           if (stream) {
             const collected = [];
+            const hasTools = Array.isArray(params.tools) && params.tools.length > 0;
             const streamState = {
               id: `chatcmpl-${Date.now()}`,
               created: Math.floor(Date.now() / 1000),
               model: params.model || "arena",
             };
 
-            res.writeHead(200, {
-              "Content-Type": "text/event-stream; charset=utf-8",
-              "Cache-Control": "no-cache, no-transform",
-              "Connection": "keep-alive",
-              "Access-Control-Allow-Origin": "*",
-            });
+            if (!hasTools) {
+              res.writeHead(200, {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+              });
 
-            streamJson(res, {
-              id: streamState.id,
-              object: "chat.completion.chunk",
-              created: streamState.created,
-              model: streamState.model,
-              choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-            });
-
-            const hasTools = Array.isArray(params.tools) && params.tools.length > 0;
+              streamJson(res, {
+                id: streamState.id,
+                object: "chat.completion.chunk",
+                created: streamState.created,
+                model: streamState.model,
+                choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+              });
+            }
 
             await new Promise((resolvePromise, rejectPromise) => {
               arenaStreamCall(
