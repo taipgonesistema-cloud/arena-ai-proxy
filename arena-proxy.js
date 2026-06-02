@@ -136,21 +136,28 @@ async function getRecaptchaToken() {
 }
 
 async function getNextAccount() {
-  if (ARENA_COOKIE) {
-    logRequest("cookies:env", { length: ARENA_COOKIE.length });
-    return { email: "env", cookieHeader: ARENA_COOKIE };
-  }
   logRequest("accounts:next:start", { session: ARENA_SESSION_URL });
   const data = await sessionJson("/accounts/next", 15000);
-  if (!data?.cookieHeader) throw new Error("No available Arena account");
-  logRequest("accounts:next:ok", { email: data.email, cookieLength: data.cookieHeader.length });
-  return { email: data.email, cookieHeader: data.cookieHeader };
+  if (data?.cookieHeader) {
+    logRequest("accounts:next:ok", { id: data.id, label: data.label, cookieLength: data.cookieHeader.length });
+    return { id: data.id, label: data.label, cookieHeader: data.cookieHeader };
+  }
+  if (ARENA_COOKIE) {
+    logRequest("cookies:env:fallback", { length: ARENA_COOKIE.length });
+    return { id: "env", label: "env", cookieHeader: ARENA_COOKIE };
+  }
+  throw new Error("No available Arena account");
 }
 
-async function markRateLimited(email) {
-  if (!email || email === "env") return;
+async function markRateLimited(idOrEmail) {
+  if (!idOrEmail || idOrEmail === "env") return;
   try {
-    await sessionJson("/accounts/rate-limit", 5000);
+    await fetch(`${ARENA_SESSION_URL}/accounts/rate-limit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: idOrEmail, cooldownMs: 60000 }),
+      signal: AbortSignal.timeout(5000),
+    });
   } catch {}
 }
 
@@ -705,16 +712,16 @@ http.createServer((req, res) => {
             });
 
             await new Promise((resolvePromise, rejectPromise) => {
-              let currentEmail = null;
+              let currentId = null;
               const doCall = async (retriesLeft) => {
                 let account;
                 try { account = await getNextAccount(); }
                 catch (err) { rejectPromise(err); return; }
                 if (!account?.cookieHeader) { rejectPromise(new Error("No Arena cookie available")); return; }
-                if (currentEmail && account.email !== currentEmail) {
-                  await markRateLimited(currentEmail).catch(() => {});
+                if (currentId && account.id !== currentId) {
+                  await markRateLimited(currentId).catch(() => {});
                 }
-                currentEmail = account.email;
+                currentId = account.id;
                 const collectedLocal = [];
                 arenaStreamCall(
                   prompt,
@@ -760,8 +767,8 @@ http.createServer((req, res) => {
                     const is429 = /429|Too Many Requests|rate.?limit/i.test(err.message);
                     if (is429 && retriesLeft > 0) {
                       const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retriesLeft));
-                      logRequest("arena:retry", { account: currentEmail, retriesLeft, delay, err: err.message.slice(0, 100) });
-                      markRateLimited(currentEmail).catch(() => {});
+                      logRequest("arena:retry", { account: currentId, retriesLeft, delay, err: err.message.slice(0, 100) });
+                      markRateLimited(currentId).catch(() => {});
                       setTimeout(() => doCall(retriesLeft - 1), delay);
                     } else {
                       if (!res.headersSent) {
@@ -780,26 +787,26 @@ http.createServer((req, res) => {
             });
           } else {
             let result = null;
-            let currentEmail = null;
+            let currentId = null;
             for (let retries = 3; retries > 0; retries--) {
               let account;
               try { account = await getNextAccount(); }
               catch (err) { throw err; }
               if (!account?.cookieHeader) throw new Error("No Arena cookie available");
-              if (currentEmail && account.email !== currentEmail) {
-                await markRateLimited(currentEmail).catch(() => {});
+              if (currentId && account.id !== currentId) {
+                await markRateLimited(currentId).catch(() => {});
               }
-              currentEmail = account.email;
+              currentId = account.id;
               result = await arenaDirectCall(prompt, modelId, account.cookieHeader, recaptchaToken);
               if (result.status === 200) break;
               const is429 = result.status === 429 || /Too Many Requests|rate.?limit/i.test(result.text);
               if (!is429 || retries <= 1) {
-                logRequest("request:error", { model: params.model || "arena-default", account: currentEmail, status: result.status, body: result.text.slice(0, 300) });
+                logRequest("request:error", { model: params.model || "arena-default", account: currentId, status: result.status, body: result.text.slice(0, 300) });
                 throw new Error(`Arena ${result.status}: ${result.text.slice(0, 500)}`);
               }
-              await markRateLimited(currentEmail).catch(() => {});
+              await markRateLimited(currentId).catch(() => {});
               const delay = Math.min(5000, 1000 * Math.pow(2, 3 - retries));
-              logRequest("arena:retry", { account: currentEmail, retriesLeft: retries - 1, delay });
+              logRequest("arena:retry", { account: currentId, retriesLeft: retries - 1, delay });
               await new Promise((r) => setTimeout(r, delay));
             }
             const parsed = parseArenaSse(result.text);

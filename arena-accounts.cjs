@@ -1,8 +1,7 @@
-const fs = require("fs");
+const http = require("http");
 const path = require("path");
 const readline = require("readline");
 
-const ACCOUNTS_PATH = path.join(__dirname, "accounts.json");
 const SESSION_URL = process.env.ARENA_SESSION_URL || "http://127.0.0.1:9230";
 
 let rl;
@@ -13,186 +12,159 @@ function clear() {
 
 function header() {
   console.log("╔══════════════════════════════════════════════╗");
-  console.log("║        Arena AI Proxy - Gerenciar Contas    ║");
+  console.log("║       Arena AI Proxy - Gerenciar Contas     ║");
   console.log("╚══════════════════════════════════════════════╝");
   console.log("");
 }
 
-function loadAccounts() {
-  if (!fs.existsSync(ACCOUNTS_PATH)) return [];
-  try { return JSON.parse(fs.readFileSync(ACCOUNTS_PATH, "utf8")); }
-  catch { return []; }
-}
-
-function saveAccounts(accounts) {
-  fs.writeFileSync(ACCOUNTS_PATH, JSON.stringify(accounts, null, 2) + "\n");
-}
-
-async function sessionGet(path, timeoutMs = 10000) {
-  try {
-    const res = await fetch(`${SESSION_URL}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
-    const text = await res.text();
-    return { ok: res.ok, data: JSON.parse(text), raw: text };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-async function sessionPost(path, body, timeoutMs = 10000) {
-  try {
-    const res = await fetch(`${SESSION_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const text = await res.text();
-    return { ok: res.ok, data: JSON.parse(text), raw: text };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-function statusIcon(account, statusData) {
-  if (!account) return "⬜";
-  const s = statusData?.find((a) => a.email === account.email);
-  if (!s) return "⬜";
-  if (s.rateLimited) return "⏳";
-  if (s.loggedIn && s.hasArenaAuth) return "✅";
-  if (s.loggedIn) return "⚠️";
-  return "❌";
-}
-
-async function showAccounts(accounts) {
-  const status = await sessionGet("/accounts").catch(() => ({ data: { accounts: [] } }));
-  const statusData = status?.data?.accounts || [];
-
-  header();
-  if (accounts.length === 0) {
-    console.log("  Nenhuma conta configurada.\n");
-    return [];
-  }
-
-  console.log("  #  Status  Email");
-  console.log("  ─  ──────  ─────");
-  accounts.forEach((acc, i) => {
-    const icon = statusIcon(acc, statusData);
-    const s = statusData?.find((a) => a.email === acc.email);
-    let label = `  ${String(i + 1).padStart(2)}  ${icon}     ${acc.email}`;
-    if (s?.rateLimited) label += "  (rate-limited)";
-    console.log(label);
-  });
-  console.log("");
-  return statusData;
-}
-
-async function addAccount() {
+async function sessionGet(pathname, timeoutMs = 10000) {
   return new Promise((resolve) => {
-    console.log("─ Adicionar Conta ─");
-    rl.question("  Email: ", (email) => {
-      if (!email.trim()) { console.log("  Cancelado.\n"); resolve(false); return; }
-      rl.question("  Senha: ", (password) => {
-        if (!password) { console.log("  Cancelado.\n"); resolve(false); return; }
-        const accounts = loadAccounts();
-        if (accounts.some((a) => a.email === email.trim())) {
-          console.log("  Conta já existe.\n");
-          resolve(false);
-          return;
-        }
-        accounts.push({ email: email.trim(), password });
-        saveAccounts(accounts);
-        console.log(`  Conta ${email.trim()} adicionada.\n`);
-        resolve(true);
+    const req = http.get(`${SESSION_URL}${pathname}`, { timeout: timeoutMs }, (res) => {
+      let data = "";
+      res.on("data", (c) => data += c);
+      res.on("end", () => {
+        try { resolve({ ok: res.statusCode < 400, data: JSON.parse(data), status: res.statusCode }); }
+        catch { resolve({ ok: false, error: "parse error", raw: data }); }
       });
     });
+    req.on("error", (err) => resolve({ ok: false, error: err.message }));
+    req.on("timeout", () => { req.destroy(); resolve({ ok: false, error: "timeout" }); });
   });
+}
+
+function sessionPost(pathname, body, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const data = JSON.stringify(body || {});
+    const options = {
+      hostname: "127.0.0.1",
+      port: 9230,
+      path: pathname,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(data),
+      },
+      timeout: timeoutMs,
+    };
+    const req = http.request(options, (res) => {
+      let responseData = "";
+      res.on("data", (c) => responseData += c);
+      res.on("end", () => {
+        try { resolve({ ok: res.statusCode < 400, data: JSON.parse(responseData), status: res.statusCode }); }
+        catch { resolve({ ok: false, error: "parse error", raw: responseData }); }
+      });
+    });
+    req.on("error", (err) => resolve({ ok: false, error: err.message }));
+    req.on("timeout", () => { req.destroy(); resolve({ ok: false, error: "timeout" }); });
+    req.write(data);
+    req.end();
+  });
+}
+
+function pad(s, n) { return String(s || "").padEnd(n); }
+
+async function showAccounts() {
+  const result = await sessionGet("/accounts");
+  const list = result?.ok ? (result.data?.accounts || []) : [];
+  header();
+  if (list.length === 0) {
+    console.log("  Nenhuma conta cadastrada.\n");
+    return list;
+  }
+  console.log(`  ${pad("#", 3)} ${pad("Status", 8)} ${pad("Label", 25)} Cookies  Auth`);
+  console.log(`  ${pad("", 3, "-")} ${pad("", 8, "-")} ${pad("", 25, "-")} ${pad("", 7, "-")} ${pad("", 4, "-")}`);
+  list.forEach((acc, i) => {
+    const status = acc.rateLimited ? "⏳LIMIT" : acc.hasArenaAuth ? "✅OK" : "❌NOAUTH";
+    const label = acc.label || acc.id;
+    console.log(`  ${pad(i + 1, 3)} ${pad(status, 8)} ${pad(label.slice(0, 24), 25)} ${pad(acc.cookieCount, 7)} ${acc.hasArenaAuth ? "✅" : "❌"}`);
+  });
+  console.log("");
+  return list;
+}
+
+async function loginNewAccount() {
+  return new Promise((resolve) => {
+    console.log("─ Adicionar Conta (Login Manual) ─");
+    console.log("  Uma janela do navegador será aberta.");
+    console.log("  Faça login manualmente na sua conta Arena.");
+    console.log("  Após o login, os cookies serão salvos automaticamente.");
+    console.log("");
+    rl.question("  Nome/identificador da conta: ", async (label) => {
+      const name = label.trim() || `Conta ${Date.now()}`;
+      console.log(`  Abrindo navegador para: ${name}...`);
+      const result = await sessionPost("/accounts/login", { label: name }, 600000);
+      if (result.ok) {
+        console.log(`  ✅ Conta "${name}" adicionada com sucesso! (${result.data?.cookieCount || 0} cookies)\n`);
+        resolve(true);
+      } else {
+        console.log(`  ❌ Erro: ${result?.data?.error || result.error}\n`);
+        resolve(false);
+      }
+    });
+  });
+}
+
+async function reLoginAccount() {
+  const list = await showAccounts();
+  if (list.length === 0) return false;
+
+  const choice = await new Promise((resolve) => {
+    console.log("─ Re-Login de Conta ─");
+    rl.question("  Número da conta (0 para cancelar): ", (a) => resolve(parseInt(a) || 0));
+  });
+  if (choice < 1 || choice > list.length) { console.log("  Cancelado.\n"); return false; }
+
+  const acc = list[choice - 1];
+  console.log(`  Re-fazendo login de: ${acc.label || acc.id}...`);
+  const result = await sessionPost("/accounts/re-login", { id: acc.id }, 600000);
+  if (result.ok) {
+    console.log(`  ✅ Re-login OK! (${result.data?.cookieCount || 0} cookies)\n`);
+  } else {
+    console.log(`  ❌ Erro: ${result?.data?.error || result.error}\n`);
+  }
+  return result.ok;
 }
 
 async function removeAccount() {
-  const accounts = loadAccounts();
-  if (accounts.length === 0) {
-    console.log("  Nenhuma conta para remover.\n");
-    return false;
-  }
+  const list = await showAccounts();
+  if (list.length === 0) return false;
 
-  return new Promise((resolve) => {
+  const choice = await new Promise((resolve) => {
     console.log("─ Remover Conta ─");
-    console.log("  Escolha o número da conta (ou 0 para cancelar):");
-    accounts.forEach((acc, i) => console.log(`  ${i + 1}. ${acc.email}`));
-    rl.question("  > ", (answer) => {
-      const num = parseInt(answer);
-      if (!num || num < 1 || num > accounts.length) {
-        console.log("  Cancelado.\n");
-        resolve(false);
-        return;
-      }
-      const removed = accounts.splice(num - 1, 1);
-      saveAccounts(accounts);
-      console.log(`  Conta ${removed[0].email} removida.\n`);
-      resolve(true);
-    });
+    rl.question("  Número da conta (0 para cancelar): ", (a) => resolve(parseInt(a) || 0));
   });
-}
+  if (choice < 1 || choice > list.length) { console.log("  Cancelado.\n"); return false; }
 
-async function loginAll() {
-  console.log("  Iniciando login de todas as contas...");
-  const result = await sessionPost("/accounts/login-all");
-  if (!result.ok) {
-    console.log(`  Erro: ${result?.data?.error || result.error}\n`);
-    return;
-  }
-  const res = result.data?.results || [];
-  const ok = res.filter((r) => r.ok).length;
-  const fail = res.filter((r) => !r.ok).length;
-  console.log(`  Login: ${ok} ok, ${fail} falha`);
-  for (const r of res) {
-    if (!r.ok) console.log(`    ${r.email}: ${r.error || "falhou"}`);
-  }
-  console.log("");
-}
-
-async function loginSingle() {
-  const accounts = loadAccounts();
-  if (accounts.length === 0) {
-    console.log("  Nenhuma conta configurada.\n");
-    return;
-  }
-  const email = await new Promise((resolve) => {
-    console.log("─ Fazer Login de uma Conta ─");
-    console.log("  Escolha o número da conta (ou 0 para cancelar):");
-    accounts.forEach((acc, i) => console.log(`  ${i + 1}. ${acc.email}`));
-    rl.question("  > ", (answer) => {
-      const num = parseInt(answer);
-      if (!num || num < 1 || num > accounts.length) resolve(null);
-      else resolve(accounts[num - 1]);
-    });
+  const acc = list[choice - 1];
+  const confirm = await new Promise((resolve) => {
+    rl.question(`  Remover "${acc.label || acc.id}"? (s/N): `, (a) => resolve(a.toLowerCase() === "s"));
   });
-  if (!email) { console.log("  Cancelado.\n"); return; }
+  if (!confirm) { console.log("  Cancelado.\n"); return false; }
 
-  console.log(`  Fazendo login: ${email.email}...`);
-  const result = await sessionPost("/accounts/login", { email: email.email, password: email.password }, 120000);
+  const result = await sessionPost("/accounts/remove", { id: acc.id });
   if (result.ok) {
-    console.log("  Login OK!\n");
+    console.log(`  Conta removida.\n`);
   } else {
     console.log(`  Erro: ${result?.data?.error || result.error}\n`);
   }
+  return result.ok;
 }
 
 async function showRateLimits() {
-  const status = await sessionGet("/accounts").catch(() => ({ data: { accounts: [] } }));
-  const list = status?.data?.accounts || [];
+  const result = await sessionGet("/accounts");
+  const list = result?.ok ? (result.data?.accounts || []) : [];
   header();
   if (list.length === 0) {
-    console.log("  Nenhuma conta registrada no session service.\n");
+    console.log("  Nenhuma conta.\n");
     return;
   }
   console.log("  Status de Rate Limit:");
   console.log("  ─────────────────────");
   for (const acc of list) {
     const until = acc.rateLimitedUntil ? new Date(acc.rateLimitedUntil).toLocaleTimeString() : "-";
-    const remaining = acc.rateLimitedUntil ? Math.max(0, Math.ceil((acc.rateLimitedUntil - Date.now()) / 1000)) + "s" : "-";
-    console.log(`  ${acc.email}`);
-    console.log(`    Logged in: ${acc.loggedIn ? "✅" : "❌"}  Auth cookie: ${acc.hasArenaAuth ? "✅" : "❌"}  Rate limited: ${acc.rateLimited ? "⏳" : "✅"}  Cooldown até: ${until} (${remaining})`);
+    const remaining = acc.rateLimitedUntil ? Math.max(0, Math.ceil((acc.rateLimitedUntil - Date.now()) / 1000)) + "s" : "✅";
+    console.log(`  ${acc.label || acc.id}`);
+    console.log(`    Auth: ${acc.hasArenaAuth ? "✅" : "❌"}  Rate limit: ${acc.rateLimited ? "⏳" : "✅"}  Disponível em: ${until} (${remaining})`);
   }
   console.log("");
 }
@@ -200,15 +172,12 @@ async function showRateLimits() {
 async function menu() {
   let running = true;
   while (running) {
-    const accounts = loadAccounts();
-    const statusData = await showAccounts(accounts);
-
+    await showAccounts();
     console.log("  Opções:");
-    console.log("    1. Adicionar conta");
-    console.log("    2. Remover conta");
-    console.log("    3. Login de todas as contas");
-    console.log("    4. Login de uma conta");
-    console.log("    5. Status de rate limit");
+    console.log("    1. Adicionar conta (login manual)");
+    console.log("    2. Re-fazer login de uma conta");
+    console.log("    3. Remover conta");
+    console.log("    4. Status de rate limit");
     console.log("    0. Sair");
     console.log("");
 
@@ -218,26 +187,12 @@ async function menu() {
     clear();
 
     switch (answer.trim()) {
-      case "1":
-        await addAccount();
-        break;
-      case "2":
-        await removeAccount();
-        break;
-      case "3":
-        await loginAll();
-        break;
-      case "4":
-        await loginSingle();
-        break;
-      case "5":
-        await showRateLimits();
-        break;
-      case "0":
-        running = false;
-        break;
-      default:
-        console.log("  Opção inválida.\n");
+      case "1": await loginNewAccount(); break;
+      case "2": await reLoginAccount(); break;
+      case "3": await removeAccount(); break;
+      case "4": await showRateLimits(); break;
+      case "0": running = false; break;
+      default: console.log("  Opção inválida.\n");
     }
   }
   console.log("  Até logo!\n");
@@ -246,57 +201,21 @@ async function menu() {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.includes("--add") && args.includes("--email") && args.includes("--password")) {
-    const email = args[args.indexOf("--email") + 1];
-    const password = args[args.indexOf("--password") + 1];
-    if (email && password) {
-      const accounts = loadAccounts();
-      if (!accounts.some((a) => a.email === email)) {
-        accounts.push({ email, password });
-        saveAccounts(accounts);
-        console.log(`Conta ${email} adicionada.`);
-      } else {
-        console.log(`Conta ${email} já existe.`);
-      }
-      process.exit(0);
-    }
-  }
-
-  if (args.includes("--remove") && args.includes("--email")) {
-    const email = args[args.indexOf("--email") + 1];
-    if (email) {
-      let accounts = loadAccounts();
-      accounts = accounts.filter((a) => a.email !== email);
-      saveAccounts(accounts);
-      console.log(`Conta ${email} removida.`);
-      process.exit(0);
-    }
-  }
-
   if (args.includes("--status")) {
-    const accounts = loadAccounts();
-    const status = await sessionGet("/accounts").catch(() => ({ data: { accounts: [] } }));
-    const list = status?.data?.accounts || [];
-    console.log(`Contas configuradas: ${accounts.length}`);
-    for (const acc of accounts) {
-      const s = list.find((a) => a.email === acc.email);
-      const state = s ? (s.rateLimited ? "rate-limited" : s.loggedIn ? "logged-in" : "not-logged-in") : "no-session";
-      console.log(`  ${acc.email}: ${state}`);
+    const result = await sessionGet("/accounts");
+    const list = result?.ok ? (result.data?.accounts || []) : [];
+    console.log(`Contas: ${list.length}`);
+    for (const acc of list) {
+      const state = acc.rateLimited ? "rate-limited" : acc.hasArenaAuth ? "ok" : "no-auth";
+      console.log(`  ${acc.label || acc.id}: ${state} (${acc.cookieCount} cookies)`);
     }
-    if (list.length === 0) console.log("  Session service não disponível ou sem contas registradas.");
+    if (!result.ok) console.log(`Session service: ${result.error}`);
     process.exit(0);
   }
 
-  rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
+  rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   clear();
   await menu();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch((err) => { console.error(err); process.exit(1); });
