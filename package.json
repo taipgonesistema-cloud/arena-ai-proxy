@@ -5,13 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "node start.cjs",
-    "login": "node login.cjs",
-    "accounts": "node arena-accounts.js",
+    "login": "node arena-accounts.js",
     "accounts:status": "node arena-accounts.js --status",
     "dev": "node start.cjs",
     "proxy": "node arena-proxy.js",
     "session": "node arena-session.cjs",
-    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js && node --check login.cjs"
+    "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js"
   },
   "dependencies": {
     "ink": "^7.0.5",
