@@ -15,6 +15,26 @@ function log(name, message) {
   process.stdout.write(`[${name}] ${message}`);
 }
 
+function ensureTorrc() {
+  if (!fs.existsSync(TOR_DIR)) return;
+  let torrc = fs.existsSync(TORRC) ? fs.readFileSync(TORRC, "utf8") : "";
+  torrc = torrc.replace(/C:\\Program Files \(x86\)\\Tor\\geoip/g, "./geoip");
+  torrc = torrc.replace(/C:\\Program Files \(x86\)\\Tor\\geoip6/g, "./geoip6");
+  const lines = torrc.split(/\r?\n/).filter((line) => line.trim());
+  const setLine = (prefix, value) => {
+    const idx = lines.findIndex((line) => line.trim().toLowerCase().startsWith(prefix.toLowerCase()));
+    if (idx >= 0) lines[idx] = value;
+    else lines.push(value);
+  };
+  setLine("GeoIPFile", "GeoIPFile ./geoip");
+  setLine("GeoIPv6File", "GeoIPv6File ./geoip6");
+  setLine("SocksPort", "SocksPort 127.0.0.1:9050");
+  setLine("ControlPort", "ControlPort 127.0.0.1:9051");
+  setLine("CookieAuthentication", "CookieAuthentication 0");
+  setLine("Log", "Log notice stdout");
+  fs.writeFileSync(TORRC, lines.join("\n") + "\n");
+}
+
 function spawnNode(name, args, env = {}) {
   const child = spawn(process.execPath, args, {
     cwd: __dirname,
@@ -115,9 +135,11 @@ process.on("SIGTERM", () => shutdown(0));
   // Auto-start Tor if available and no PROXY env set
   const hasTor = fs.existsSync(TOR_EXE);
   if (hasTor && !process.env.PROXY && !process.env.PROXY_LIST) {
+    ensureTorrc();
     process.env.PROXY = "socks5://127.0.0.1:9050";
     spawnTor();
     await waitForPort(9050, 30000);
+    await waitForPort(9051, 30000);
     console.log("[start] Tor pronto (socks5://127.0.0.1:9050)");
   } else if (hasTor) {
     console.log(`[start] Proxy configurado via env: ${process.env.PROXY || process.env.PROXY_LIST}`);

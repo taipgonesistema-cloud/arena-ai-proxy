@@ -255,6 +255,7 @@ pi --offline --model arena-ai/arena-default -p "Use uma ferramenta para ver onde
 | `npm start` | Inicia Tor, session service e proxy |
 | `npm run login` | Abre a TUI de gerenciamento de contas |
 | `npm run accounts:status` | Mostra status rápido das contas |
+| `npm run doctor` | Diagnostica Tor, portas, contas e endpoints |
 | `npm run proxy` | Inicia apenas o proxy OpenAI-compatible |
 | `npm run session` | Inicia apenas o session service |
 | `npm run check` | Valida a sintaxe dos arquivos principais |
@@ -267,6 +268,7 @@ arena-session.cjs      Session service com Playwright, contas, Tor e reCAPTCHA
 arena-accounts.js      TUI de gerenciamento de contas
 start.cjs              Orquestrador: Tor + session + proxy
 setup-tor.cjs          Instalador automático do Tor Expert Bundle
+doctor.cjs             Diagnóstico da instalação e dos serviços
 data/models-list.json  Lista versionada de modelos
 accounts.json          Cookies das contas, ignorado pelo Git
 tor/                   Binários do Tor, ignorado pelo Git
@@ -332,9 +334,31 @@ Esse erro geralmente indica limite global ou por IP. O Tor é iniciado automatic
 node -e "fetch('http://127.0.0.1:9230/status').then(r=>r.json()).then(console.log)"
 ```
 
+Healthcheck completo do session service:
+
+```bat
+node -e "fetch('http://127.0.0.1:9230/health').then(r=>r.json()).then(console.log)"
+```
+
 ```bat
 node -e "fetch('http://127.0.0.1:9228/v1/models').then(r=>r.json()).then(console.log)"
 ```
+
+Diagnóstico geral:
+
+```bat
+npm run doctor
+```
+
+### Trocar circuito do Tor
+
+Com a stack rodando, solicite um novo circuito Tor:
+
+```bat
+node -e "fetch('http://127.0.0.1:9230/tor/newnym',{method:'POST'}).then(r=>r.json()).then(console.log)"
+```
+
+Isso envia `SIGNAL NEWNYM` para o ControlPort do Tor, limpa o estado de proxies ruins em memória e recria os runtimes das contas no próximo uso.
 
 ## Observações
 

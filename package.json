@@ -10,6 +10,7 @@
     "login": "node arena-accounts.js",
     "accounts:status": "node arena-accounts.js --status",
     "dev": "node start.cjs",
+    "doctor": "node doctor.cjs",
     "proxy": "node arena-proxy.js",
     "session": "node arena-session.cjs",
     "check": "node --check arena-proxy.js && node --check arena-session.cjs && node --check start.cjs && node --check arena-accounts.js"

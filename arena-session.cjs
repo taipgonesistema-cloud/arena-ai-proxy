@@ -1,5 +1,6 @@
 const fs = require("fs");
 const http = require("http");
+const net = require("net");
 const path = require("path");
 
 const PORT = Number(process.env.ARENA_SESSION_PORT || 9230);
@@ -8,6 +9,8 @@ const BROWSER_CHANNEL = process.env.ARENA_BROWSER_CHANNEL || "chrome";
 const ENV_PATH = path.join(__dirname, ".env");
 const ACCOUNTS_PATH = path.join(__dirname, "accounts.json");
 const SITE_KEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0";
+const TOR_SOCKS_PORT = Number(process.env.TOR_SOCKS_PORT || 9050);
+const TOR_CONTROL_PORT = Number(process.env.TOR_CONTROL_PORT || 9051);
 
 let browser = null;
 let defaultContext = null;
@@ -86,6 +89,51 @@ function proxyPoolStatus() {
     good: proxyPool.length - badProxyServers.size,
     currentIndex: proxyPoolIndex,
   };
+}
+
+function checkTcpPort(port, host = "127.0.0.1", timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const done = (ok) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.on("connect", () => done(true));
+    socket.on("timeout", () => done(false));
+    socket.on("error", () => done(false));
+  });
+}
+
+function torControl(commands, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port: TOR_CONTROL_PORT });
+    let data = "";
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Tor control timeout"));
+    }, timeoutMs);
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write(commands.join("\r\n") + "\r\n"));
+    socket.on("data", (chunk) => data += chunk);
+    socket.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    socket.on("close", () => {
+      clearTimeout(timer);
+      if (/^5\d\d/m.test(data)) reject(new Error(data.trim() || "Tor control failed"));
+      else resolve(data);
+    });
+  });
+}
+
+async function requestTorNewnym() {
+  const response = await torControl(["AUTHENTICATE", "SIGNAL NEWNYM", "QUIT"]);
+  badProxyServers.clear();
+  for (const id of [...accountRuntimes.keys()]) await closeAccountRuntime(id);
+  globalRateLimitedUntil = 0;
+  return response;
 }
 
 function classifyArenaError(status, text) {
@@ -412,6 +460,43 @@ server = http.createServer(async (req, res) => {
         accounts: accountsStatus(),
         accountCount: accounts.size,
       });
+    }
+
+    if (pathname === "/health") {
+      const accountsList = accountsStatus();
+      const torSocks = await checkTcpPort(TOR_SOCKS_PORT);
+      const torControlOpen = await checkTcpPort(TOR_CONTROL_PORT);
+      const browserOk = !!browser;
+      const pageOpen = !!defaultPage && !defaultPage.isClosed();
+      const accountsAvailable = accountsList.filter((acc) => acc.hasArenaAuth && !acc.rateLimited).length;
+      const checks = {
+        browser: browserOk,
+        pageOpen,
+        torSocks,
+        torControl: torControlOpen,
+        accountsAvailable: accountsAvailable > 0,
+      };
+      return json(res, 200, {
+        ok: Object.values(checks).every(Boolean),
+        checks,
+        startedAt: browserStartedAt,
+        url: defaultPage?.url?.() || null,
+        proxy: proxyPoolStatus(),
+        globalRateLimited: globalRateLimitedUntil > Date.now(),
+        globalRateLimitedUntil,
+        accountCount: accounts.size,
+        accountsAvailable,
+      });
+    }
+
+    if (pathname === "/tor/newnym" && req.method === "POST") {
+      try {
+        const response = await requestTorNewnym();
+        log("Tor NEWNYM solicitado; runtimes reiniciados");
+        return json(res, 200, { ok: true, response });
+      } catch (err) {
+        return json(res, 503, { ok: false, error: err.message });
+      }
     }
 
     if (pathname === "/cookies") {

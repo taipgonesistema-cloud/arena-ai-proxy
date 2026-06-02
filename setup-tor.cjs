@@ -9,6 +9,25 @@ const TOR_ZIP = path.join(TOR_DIR, "tor.zip");
 const TOR_VERSION = "v0.4.5.10";
 const DOWNLOAD_URL = `https://github.com/matinrco/tor/releases/download/${TOR_VERSION}/tor-expert-bundle-${TOR_VERSION}.zip`;
 
+function ensureTorrc(torrcPath) {
+  let torrc = fs.existsSync(torrcPath) ? fs.readFileSync(torrcPath, "utf8") : "";
+  torrc = torrc.replace(/C:\\Program Files \(x86\)\\Tor\\geoip/g, "./geoip");
+  torrc = torrc.replace(/C:\\Program Files \(x86\)\\Tor\\geoip6/g, "./geoip6");
+  const lines = torrc.split(/\r?\n/).filter((line) => line.trim());
+  const setLine = (prefix, value) => {
+    const idx = lines.findIndex((line) => line.trim().toLowerCase().startsWith(prefix.toLowerCase()));
+    if (idx >= 0) lines[idx] = value;
+    else lines.push(value);
+  };
+  setLine("GeoIPFile", "GeoIPFile ./geoip");
+  setLine("GeoIPv6File", "GeoIPv6File ./geoip6");
+  setLine("SocksPort", "SocksPort 127.0.0.1:9050");
+  setLine("ControlPort", "ControlPort 127.0.0.1:9051");
+  setLine("CookieAuthentication", "CookieAuthentication 0");
+  setLine("Log", "Log notice stdout");
+  fs.writeFileSync(torrcPath, lines.join("\n") + "\n");
+}
+
 async function download(url, dest) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith("https") ? https : http;
@@ -60,15 +79,8 @@ async function main() {
       throw new Error("Falha ao extrair zip");
     }
 
-    // Fix torrc paths
     const torrcPath = path.join(TOR_DIR, "torrc");
-    if (fs.existsSync(torrcPath)) {
-      let torrc = fs.readFileSync(torrcPath, "utf8");
-      torrc = torrc.replace(/C:\\Program Files \(x86\)\\Tor\\geoip/g, "./geoip");
-      torrc = torrc.replace(/C:\\Program Files \(x86\)\\Tor\\geoip6/g, "./geoip6");
-      if (!torrc.includes("Log notice stdout")) torrc += "\nLog notice stdout\n";
-      fs.writeFileSync(torrcPath, torrc);
-    }
+    ensureTorrc(torrcPath);
 
     fs.unlinkSync(TOR_ZIP);
     console.log("[setup-tor] Tor instalado em", TOR_DIR);
