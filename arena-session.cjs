@@ -8,11 +8,6 @@ const BROWSER_CHANNEL = process.env.ARENA_BROWSER_CHANNEL || "chrome";
 const ENV_PATH = path.join(__dirname, ".env");
 const ACCOUNTS_PATH = path.join(__dirname, "accounts.json");
 const SITE_KEY = "6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0";
-const FREE_PROXY_SOURCES = [
-  { url: "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt", protocol: "socks5" },
-  { url: "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt", protocol: "http" },
-  { url: "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", protocol: "http" },
-];
 
 let browser = null;
 let defaultContext = null;
@@ -66,10 +61,6 @@ function initProxyPoolFromEnv() {
   return proxyPool.length > 0;
 }
 
-function freeProxiesEnabled() {
-  return !process.env.NO_PROXY && !process.env.ARENA_NO_FREE_PROXIES;
-}
-
 function getNextProxy() {
   if (proxyPool.length === 0) return null;
   const start = proxyPoolIndex;
@@ -95,29 +86,6 @@ function proxyPoolStatus() {
     good: proxyPool.length - badProxyServers.size,
     currentIndex: proxyPoolIndex,
   };
-}
-
-async function fetchFreeProxies() {
-  if (proxyPool.length > 0) return;
-  log("buscando proxies gratuitos...");
-  const seen = new Set();
-  for (const source of FREE_PROXY_SOURCES) {
-    try {
-      const res = await fetch(source.url, { signal: AbortSignal.timeout(15000) });
-      if (!res.ok) continue;
-      const text = await res.text();
-      const lines = text.trim().split("\n").filter(Boolean);
-      for (const line of lines) {
-        const p = parseProxyEntry(line.trim(), source.protocol);
-        if (p && !seen.has(p.server)) {
-          seen.add(p.server);
-          proxyPool.push(p);
-        }
-      }
-      if (proxyPool.length >= 50) break;
-    } catch { continue; }
-  }
-  log(`proxy pool: ${proxyPool.length} proxies carregados`);
 }
 
 function classifyArenaError(status, text) {
@@ -408,7 +376,6 @@ async function startBrowser() {
   browserStartedAt = Date.now();
   loadAccountsIntoMemory();
   initProxyPoolFromEnv();
-  if (proxyPool.length === 0 && freeProxiesEnabled()) await fetchFreeProxies();
   await createDefaultContext();
   // apply first available account's cookies so the page loads logged in
   const first = getNextAvailableAccount();
